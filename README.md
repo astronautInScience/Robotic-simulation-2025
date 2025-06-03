@@ -20,15 +20,15 @@ This repository contains a Hardware-in-the-Loop (HiL) simulation project integra
 
 The project is organized into volumes based on functionality:
 
-### Volume 1: Webots Controller
+### Webots Controller
 - `my_controller.py`: Main Python script for Webots, handling robot control, sensor data, and communication with ESP32.
   - Contains odometry, motor control, sensor reading, and network logic.
 
-### Volume 2: ESP32 MicroPython Code
+### ESP32 MicroPython Code
 - `esp32_path_planning.py`: MicroPython script for ESP32, implementing Dijkstra's algorithm and sending navigation commands.
   - Includes path computation and obstacle integration.
 
-### Volume 3: Configuration and Documentation
+### Configuration and Documentation
 - `README.md`: This file, providing setup and usage instructions.
 - `requirements.txt`: Lists Python dependencies.
 - `webots_world.wbt`: Webots world file defining the simulation environment.
