@@ -1,4 +1,3 @@
----
 
 # Webots HIL Simulation with ESP32 Path Planning 🌐🤖🔧
 
@@ -180,4 +179,4 @@ Where:
 * Path visualization was disabled to optimize performance.
 * Focus is on real-time execution and response.
 
----
+
