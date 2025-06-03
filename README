@@ -1,171 +1,262 @@
+```markdown
 ---
 
-# Webots HiL Simulation with ESP32 Dijkstra Path Planning
+# Webots HIL Simulation with ESP32 Path Planning
 
-This repository contains a Hardware-in-the-Loop (HiL) simulation system where a Webots-based e-puck robot receives navigation commands from an ESP32 microcontroller running MicroPython. The ESP32 executes Dijkstra's algorithm for path planning and communicates wirelessly with Webots.
+This repository contains a Hardware-in-the-Loop (HiL) simulation project integrating Webots with an ESP32 microcontroller for robotic path planning and navigation. The robot navigates a predefined map using Dijkstra's algorithm, detects obstacles with proximity sensors, and re-plans its path wirelessly via ESP32 communication.
 
 ## Project Overview
 
-* **Purpose**: To demonstrate HiL simulation with path planning computed externally on an ESP32 and executed by a robot in Webots.
-* **Key Features**:
-
-  * Real-time serial communication between Webots and ESP32.
-  * Dijkstra's algorithm implemented in MicroPython.
-  * PID control and wall-following in Webots for navigation.
-  * Modular code structure separating ESP32 logic from Webots control.
+- **Purpose**: Implement a HiL simulation where a Webots robot is controlled by an ESP32 running MicroPython, featuring path planning and obstacle avoidance.
+- **Key Features**:
+  - HiL simulation using Webots and ESP32.
+  - Dijkstra's algorithm for path planning on ESP32.
+  - Obstacle detection and dynamic path re-planning.
+  - Wireless communication between Webots and ESP32.
 
 ## Code Structure
 
+The project is organized into volumes based on functionality:
+
 ### Webots Controller
-
-* `my_controller.py`: Controls the e-puck robot in Webots based on path input from ESP32. Features:
-
-  * Serial communication interface (USB/Thonny-compatible).
-  * PID controller for movement.
-  * Odometry and wheel encoder updates.
-  * State machine logic for executing paths.
+- `my_controller.py`: Main Python script for Webots, handling robot control, sensor data, and communication with ESP32.
+  - Contains odometry, motor control, sensor reading, and network logic.
 
 ### ESP32 MicroPython Code
+- `esp32_path_planning.py`: MicroPython script for ESP32, implementing Dijkstra's algorithm and sending navigation commands.
+  - Includes path computation and obstacle integration.
 
-* `esp32_dijkstra.py`: Implements Dijkstra's algorithm to calculate the shortest path between nodes.
-
-  * Upload using Thonny IDE via USB.
-  * Sends computed path (as a list of nodes) to Webots.
-  * Also controls program start/stop.
-
-### Additional Files
-
-* `webots_maze.wbt`: Webots world file including a maze environment with nodes.
-* `README.md`: Project documentation and setup guide.
+### Configuration and Documentation
+- `README.md`: This file, providing setup and usage instructions.
+- `requirements.txt`: Lists Python dependencies.
+- `webots_world.wbt`: Webots world file defining the simulation environment.
 
 ## Dependencies
 
-* **Python Version**: 3.8+
-* **Pip Packages**:
+- **Python Version**: 3.9 or higher
+- **Pip Packages** (install via `pip install -r requirements.txt`):
+  - `webots` (Webots Python API, installed with Webots)
+  - `socket` (Python standard library, no installation needed)
+  - `json` (Python standard library, no installation needed)
+  - `math` (Python standard library, no installation needed)
+- **Hardware**: ESP32 microcontroller with MicroPython firmware.
+- **Software**: Webots (latest stable version, e.g., 2023a).
 
-  * `pyserial` (for USB communication)
-  * `math`, `json`, `time` (standard libraries)
-* **Microcontroller**: ESP32 with MicroPython firmware.
-* **Simulation**: Webots R2023a or newer.
-
-## Getting Started
+## How to Reproduce the Main Experiment or Result
 
 ### Prerequisites
-
-1. Install Webots from [Cyberbotics](https://cyberbotics.com/).
-2. Flash ESP32 with MicroPython using [esptool](https://github.com/espressif/esptool).
-3. Install Thonny for code uploading.
+1. Install Webots from [cyberbotics.com](https://cyberbotics.com/).
+2. Set up an ESP32 with MicroPython (use [esptool](https://github.com/espressif/esptool) to flash firmware).
+3. Ensure both Webots and ESP32 are on the same WiFi network.
 
 ### Steps
-
 1. **Clone the Repository**:
-
    ```bash
-   git clone https://github.com/yourusername/webots-esp32-hil
-   cd webots-esp32-hil
+   git clone [https://github.com/yourusername/webots-hil-esp32.git](https://github.com/yourusername/webots-hil-esp32.git)
+   cd webots-hil-esp32
    ```
 
-2. **Install Python Dependencies**:
-
+2. **Install Dependencies**:
    ```bash
-   pip install pyserial
+   pip install -r requirements.txt
    ```
 
-3. **Upload ESP32 Code**:
+3. **Configure Network**:
+   - Update `ESP32_IP_ADDRESS` in `my_controller.py` to match your ESP32's IP (e.g., `192.168.4.1`).
+   - Ensure `ESP32_PORT` (8080) is open on the ESP32.
 
-   * Open `esp32_dijkstra.py` in Thonny.
-   * Connect ESP32 and upload the script.
-   * Press the ESP32 button to start execution.
+4. **Deploy ESP32 Code**:
+   - Copy `esp32_path_planning.py` to the ESP32 using a tool like `ampy` or `rshell`:
+     ```bash
+     ampy --port /dev/ttyUSB0 put esp32_path_planning.py
+     ```
+   - Run the script on ESP32 via a serial terminal.
 
-4. **Run Webots Simulation**:
+5. **Run Webots Simulation**:
+   - Open Webots and load `webots_world.wbt`.
+   - Set `my_controller.py` as the controller for the robot.
+   - Start the simulation and observe the robot moving toward `(14, 0)`.
 
-   * Open `webots_maze.wbt` in Webots.
-   * Assign `my_controller.py` to the e-puck robot.
-   * Start simulation to observe robot path execution.
+6. **Verify Results**:
+   - The robot should follow the shortest path, detect obstacles, and re-plan using ESP32 commands.
+   - Check Webots console for status updates (e.g., `ESP32 connected successfully`).
 
 ### Expected Outcome
-
-* ESP32 sends shortest path node list to Webots.
-* Webots robot follows the path, using PID control.
-* Robot adjusts trajectory and avoids collisions using wall-following logic.
+- A working HiL simulation where the Webots robot is controlled by the ESP32.
+- The robot navigates to the goal `(14, 0)` using Dijkstra's algorithm.
+- Obstacle detection triggers path re-planning.
 
 ## Function Documentation
 
-* \`\`:
+Each function in `my_controller.py` includes a docstring with purpose, inputs, outputs, and side effects.
 
-  * **Purpose**: Computes shortest path from `start` to `end` in a node graph.
-  * **Inputs**: `graph` (dict), `start` (str), `end` (str).
-  * **Outputs**: List of node names representing shortest path.
+- **`world_to_grid(world_x, world_z)`**:
+  - **Purpose**: Converts world coordinates to grid coordinates.
+  - **Inputs**: `world_x` (float), `world_z` (float) - World coordinates.
+  - **Outputs**: Tuple `(row, col)` - Grid coordinates.
+  - **Side Effects**: None.
 
-* \`\` (Webots):
+- **`grid_to_world_center(row, col)`**:
+  - **Purpose**: Converts grid coordinates to world center coordinates.
+  - **Inputs**: `row` (int), `col` (int) - Grid coordinates.
+  - **Outputs**: Tuple `(world_x, world_z)` - World coordinates.
+  - **Side Effects**: None.
 
-  * **Purpose**: Reads path commands from ESP32 via USB.
-  * **Output**: List of node indices.
+- **`get_line_centered_position(rwp, crgp, ldf)`**:
+  - **Purpose**: Centers robot position on the nearest black line cell based on sensor data.
+  - **Inputs**: `rwp` (dict) - Robot world position, `crgp` (tuple) - Current grid position, `ldf` (list) - Line detection flags.
+  - **Outputs**: Tuple `(x, z)` - Centered world coordinates.
+  - **Side Effects**: None.
 
-* \`\` (Webots):
+- **`detect_obstacles_from_distance_sensors(rwp, robot_theta, distance_values)`**:
+  - **Purpose**: Detects obstacles using distance sensors and updates the obstacle grid.
+  - **Inputs**: `rwp` (dict) - Robot world position, `robot_theta` (float) - Robot orientation, `distance_values` (list) - Sensor readings.
+  - **Outputs**: List of `(row, col)` tuples - New obstacle positions.
+  - **Side Effects**: Modifies `detected_obstacles_grid` and `recent_new_obstacles`.
 
-  * **Purpose**: Executes movement to a specified node using PID and wheel control.
+- **`connect_to_esp32()`**:
+  - **Purpose**: Establishes a TCP connection to the ESP32.
+  - **Inputs**: None.
+  - **Outputs**: Boolean - Success status.
+  - **Side Effects**: Updates `client_socket` and `is_connected` globals.
 
-* \`\`:
+## HiL Simulation Setup
 
-  * **Purpose**: Updates robot position estimate using wheel encoders.
+- **Implementation**: The project correctly implements a HiL simulation using:
+  - The provided Webots environment (`webots_world.wbt`).
+  - MicroPython code on the ESP32 (`esp32_path_planning.py`).
+  - Python code in Webots (`my_controller.py`).
+- **Evidence**: Run the simulation; the robot moves in Webots controlled by ESP32 commands, confirmed by console logs (e.g., `Received command: forward`).
 
-* \`\`:
+## Path-Planning on the ESP32
 
-  * **Purpose**: Uses proximity sensors to stay aligned with maze walls.
+- **Implementation**: Dijkstra's algorithm is implemented and runs on the ESP32 to compute the shortest path from the current position to `(14, 0)`.
+- **Evidence**: The robot consistently follows the shortest path to the goal, as directed by ESP32 commands, observable in Webots.
 
-## HiL Integration
+## Obstacle Detection and Re-Planning
 
-* **Design**: Path planning is fully offloaded to ESP32.
-* **Webots Role**: Executes path using serial input, sensor feedback, and closed-loop control.
-* **ESP32 Role**: Computes optimal path and sends start/stop signal.
-* **Connection**: Serial (USB) using `/dev/ttyUSB0` or COM port.
+- **Implementation**: The robot uses proximity sensors (ps5, ps7, ps0) to detect obstacles and re-plans its path via ESP32.
+- **Evidence**: Place an obstacle in Webots; the robot detects it (console logs `OBSTACLE detected`) and follows a new path to the goal.
 
-## Path Planning Algorithm: Dijkstra
+## Path Visualization
 
-### Overview
+- **Note**: Visualization (both during and after simulation) has been removed to optimize performance. The map and path are not plotted.
+This section provides a comprehensive explanation of the A (A-star) algorithm* used in the `esp32_path_planning.py` script for path planning on the ESP32 microcontroller within a Hardware-in-the-Loop (HiL) simulation setup with Webots. The explanation covers the algorithm's mechanics, implementation details, integration with the system, and its performance in the context of the simulation as of 02:44 PM CEST on Tuesday, June 03, 2025.
 
-Dijkstra's algorithm finds the shortest path in a graph with non-negative weights. It tracks minimum cumulative distances from the start node to all others, using a priority queue to visit the most promising node next.
+### A* Algorithm Overview
+The A* algorithm is an informed search algorithm widely used for pathfinding in graphs or grids, combining the strengths of Dijkstra's algorithm (guaranteed shortest path) and greedy best-first search (heuristic-guided exploration). It uses a priority queue to explore nodes based on an f-score, defined as:
+$\qquad f(n) = g(n) + h(n) $
 
-### Pseudocode
+where:
+- $g(n)$: The actual cost from the start node to the current node.
+- $h(n)$: The heuristic estimate of the cost from the current node to the goal.
 
-```python
-function dijkstra(graph, start):
-    dist = {node: inf for node in graph}
-    dist[start] = 0
-    prev = {}
-    queue = PriorityQueue()
-    queue.put((0, start))
+A* is optimal (finds the shortest path) and complete (always finds a solution if one exists) when the heuristic is admissible (never overestimates the true cost) and monotonic (satisfies the triangle inequality). In this implementation, two admissible heuristics are provided: Manhattan distance (default) and Euclidean distance, with Manhattan being more suitable for the 4-directional grid movement (up, down, left, right).
 
-    while not queue.empty():
-        cost, current = queue.get()
-        for neighbor, weight in graph[current]:
-            alt = cost + weight
-            if alt < dist[neighbor]:
-                dist[neighbor] = alt
-                prev[neighbor] = current
-                queue.put((alt, neighbor))
+### Implementation Details
+The A* algorithm is implemented in the `a_star` function, supported by auxiliary classes and functions. Here's a detailed breakdown:
 
-    return dist, prev
-```
+1.  **`AStarPriorityQueue` Class**
 
-### Implementation Notes
+    -   **Purpose**: A custom priority queue to manage nodes for A\* exploration, prioritizing the lowest f\_score.
+    -   **Methods**:
+        -   `put(item, f_score)`: Adds a node with its f\_score, maintaining a sorted queue (lower f\_score first).
+        -   `get()`: Retrieves and removes the node with the lowest f\_score.
+        -   `is_empty()`: Checks if the queue is empty.
+    -   **Role**: Ensures efficient selection of the most promising nodes, optimizing the search on the resource-constrained ESP32.
 
-* Graph is predefined in ESP32 as an adjacency list.
-* Uses tuple `(node, cost)` format.
-* Sends computed path as list of node names (e.g., `['A', 'B', 'E', 'F']`).
+2.  **Heuristic Functions**
 
-## Path Execution and Re-Planning
+    -   **`manhattan_distance(node1, node2)`**:
+        -   Computes the Manhattan distance (L1 norm): $\qquad |x_1 - x_2| + |y_1 - y_2| $.
+        -   Admissible for 4-directional movement, as it never overestimates the cost.
+        -   Used as the default heuristic due to its alignment with the grid's movement model.
 
-* **Initial Path**: Sent once at simulation start.
-* **Re-Planning**: Not automatic in current version (planned in future update).
-* **User Control**: ESP32 has push-button to send new path on-demand.
+    -   **`euclidean_distance(node1, node2)`**:
+        -   Computes the Euclidean distance (L2 norm): $\qquad \sqrt{(x_1 - x_2)^2 + (y_1 - y_2)^2} $.
+        -   Also admissible but less tight for 4-directional grids, potentially leading to more node exploration.
 
-## Future Work
+    -   **Selection**: The `heuristic` parameter in `a_star` allows switching between these, with `'manhattan'` as the default.
 
-* Add real-time obstacle detection in Webots.
-* Enable dynamic re-planning on ESP32.
-* Implement A\* support on ESP32.
-* Add GUI for path visualization.
+3.  **`get_valid_neighbors(r, c, rows, cols, grid)`**
 
----
+    -   **Purpose**: Identifies valid neighboring cells for the robot to move to.
+    -   **Logic**: Evaluates 4-directional neighbors (right, left, down, up) and ensures:
+        -   The neighbor is within grid bounds (`0 <= nr < rows` and `0 <= nc < cols`).
+        -   The cell is pathable (`grid` value = 0, representing a black line).
+    -   **Output**: Returns a list of `((row, col), cost)` tuples, where the cost is 1 for adjacent cells (uniform cost grid).
+    -   **Role**: Defines the robot's movement model, restricting it to orthogonal moves.
+
+4.  **`a_star(grid, start_node, end_node, heuristic='manhattan')`**
+
+    -   **Purpose**: Implements the A\* algorithm to compute the shortest path.
+    -   **Inputs**:
+        -   `grid`: 2D list representing the map (0 = pathable, 1 = obstacle).
+        -   `start_node`: Tuple `(row, col)` of the starting position.
+        -   `end_node`: Tuple `(row, col)` of the goal position.
+        -   `heuristic`: String specifying the heuristic (`'manhattan'` or `'euclidean'`).
+    -   **Outputs**: List of `(row, col)` tuples representing the shortest path, or an empty list if no path exists.
+    -   **Algorithm Steps**:
+        1.  **Validation**: Ensures start and end nodes are within bounds and pathable.
+        2.  **Initialization**:
+            -   Uses `AStarPriorityQueue` for the open set.
+            -   Initializes `came_from` (to trace the path), `g_score` (cost from start), and `f_score` ($g + h$).
+            -   Starts with `start_node` and its f\_score (initially just $h$).
+        3.  **Exploration**:
+            -   Extracts the node with the lowest f\_score from the open set.
+            -   If the goal is reached, reconstructs and returns the path.
+            -   For each valid neighbor, calculates `tentative_g_score` (current $g$ + move cost).
+            -   Updates if a better path is found, adding the neighbor to the open set with its new f\_score.
+        4.  **Termination**: Continues until the open set is empty (no path) or the goal is reached.
+        5.  **Path Reconstruction**: Traces back from the goal using `came_from`.
+        6.  **Optimizations**: Calls `gc.collect()` to manage memory on the ESP32.
+        7.  **Debugging**: Logs the number of nodes explored and path length for performance monitoring.
+
+5.  **`detect_obstacles_from_distance_sensor(distance_value, robot_pos, robot_theta)`**
+
+    -   **Purpose**: Detects obstacles using distance sensor data and updates the grid.
+    -   **Inputs**: `distance_value` (float in meters), `robot_pos` (current grid position), `robot_theta` (orientation in radians).
+    -   **Logic**: Marks the cell 1 position ahead as an obstacle if the distance is below `OBSTACLE_THRESHOLD` (0.1m).
+    -   **Orientation Handling**: Uses `robot_theta` to determine direction (right, down, up, left) and adjusts the row/column offset.
+    -   **Output**: List of new obstacle positions.
+    -   **Side Effect**: Modifies `grid_map` by setting the detected cell to 1 (obstacle).
+    -   **Role**: Triggers path re-planning when obstacles are detected, ensuring dynamic adaptation.
+
+6.  **`get_action_from_path(robot_pos_on_path, world_theta_rad, webots_line_sensors_binary)`**
+
+    -   **Purpose**: Determines the robot's next action (`stop`, `forward`, `turn_left`, `turn_right`) based on the planned path.
+    -   **Inputs**: Current position on path, robot orientation, and line sensor data (unused here).
+    -   **Logic**:
+        -   Stops if the goal is reached.
+        -   Aligns `current_path_index` if the robot deviates from the expected path position.
+        -   Calculates the target orientation to the next node and compares it with the current orientation (`world_theta_rad`).
+        -   Triggers a turn if the angle difference exceeds `ANGLE_THRESHOLD_RAD` (40 degrees), otherwise moves forward.
+    -   **Output**: Tuple `(action_string, current_position)`.
+    -   **Role**: Translates the A\* path into actionable motor commands for Webots.
+
+### Integration with HiL System
+The A* algorithm is seamlessly integrated into the `main()` function, which orchestrates the HiL workflow:
+
+-   **WiFi Connection**: The `connect_wifi` function establishes a network link, crucial for communication with Webots.
+-   **Server Setup**: `start_server` creates a TCP server on port 8080 to receive data from Webots.
+-   **Data Processing**: Parses JSON data from Webots, including:
+    -   `robot_grid_pos`: Current position.
+    -   `goal_grid_pos`: Target position.
+    -   `world_pose.theta_rad`: Orientation.
+    -   `distance_sensor`: Obstacle detection input.
+-   **Path Planning Loop**:
+    -   Executes A\* when `path_needs_replan` is `True` or every `REPLAN_INTERVAL_MS` (20 seconds).
+    -   Updates `planned_path` and aligns `current_robot_grid_pos_path` with the robot's actual position.
+-   **Command Sending**: Sends actions (`esp32_command`) and the planned path back to Webots via JSON.
+
+An onboard LED (GPIO2) provides visual feedback: blinking during connection attempts and solid when connected.
+
+### Algorithm Behavior and Evidence
+
+-   **Optimality**: A\* with the Manhattan heuristic guarantees the shortest path in a 4-directional grid, as demonstrated by the robot efficiently navigating to the goal (14, 0).
+-   **Obstacle Handling**: When an obstacle is detected (e.g., distance < 0.1m), the grid is updated, and A\* re-plans, evidenced by logs of new `planned_path` updates.
+-   **Performance**: The algorithm explores a manageable number of nodes (logged via `a_star`), suitable for the ESP32's limited resources, with `gc.collect()` mitigating memory constraints.
+
+### Limitations and Potential Improvements
+
+-   **Heuristic**: The Manhattan heuristic is optimal for 4-directional movement but could be enhanced for 8-directional movement (including diagonals) using a modified heuristic (e.g., $ \sqrt{2}
