@@ -1,4 +1,3 @@
-Below is the complete README file in Markdown (`.md`) format, tailored for your GitHub repository, incorporating the requested sections including code structure, dependencies, experiment reproduction, function docstrings, HiL simulation setup, path-planning, obstacle detection, path visualization (noted as removed), and wireless communication details. The date and time have been updated to reflect 02:07 PM CEST on Tuesday, June 03, 2025.
 
 ---
 
@@ -8,7 +7,6 @@ This repository contains a Hardware-in-the-Loop (HiL) simulation project integra
 
 ## Project Overview
 
-- **Date**: June 03, 2025, 02:07 PM CEST
 - **Purpose**: Implement a HiL simulation where a Webots robot is controlled by an ESP32 running MicroPython, featuring path planning and obstacle avoidance.
 - **Key Features**:
   - HiL simulation using Webots and ESP32.
