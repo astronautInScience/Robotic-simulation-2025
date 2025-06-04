@@ -1,0 +1,398 @@
+import network
+import socket
+import json
+import time
+import gc
+from machine import Pin
+import math
+import heapq  # New: For heap-based priority queue
+
+# Hotspot Configuration
+HOTSPOT_SSID = ''  # TODO: Set your hotspot SSID
+HOTSPOT_PASSWORD = ''  # TODO: Set your hotspot password
+
+# Network Configuration
+ESP32_PORT = 8080
+MASTER_IP = '192.168.4.1'  # New: Define MASTER_IP to match Webots
+MASTER_PORT = 8080  # New: Define MASTER_PORT to match Webots
+
+# Onboard LED
+led = Pin(2, Pin.OUT)
+
+# Grid Configuration
+GRID_ROWS = 15
+GRID_COLS = 19
+grid_map = [
+    [1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,0],
+    [0,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,0],
+    [0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,0],
+    [0,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,0],
+    [0,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0],
+    [0,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,0],
+    [0,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1],
+    [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1]
+]
+
+# New: Track obstacles in grid
+obstacles_grid = set()
+
+# Path Planning State
+current_robot_grid_pos_actual = None
+current_robot_grid_pos_path = None
+goal_grid_pos = None
+planned_path = []
+current_path_index = 0
+path_needs_replan = True
+last_replan_time = 0
+REPLAN_INTERVAL_MS = 1000
+ANGLE_THRESHOLD_RAD = math.radians(20)  # New: Reduced for tighter control
+
+# New: Heap-based Priority Queue for Dijkstra
+class HeapPriorityQueue:
+    def __init__(self):
+        self._queue = []
+        self._entry_finder = {}
+        self._counter = 0
+
+    def put(self, item, priority):
+        if item in self._entry_finder:
+            self._remove_item(item)
+        entry = [priority, self._counter, item]
+        self._entry_finder[item] = entry
+        heapq.heappush(self._queue, entry)
+        self._counter += 1
+
+    def _remove_item(self, item):
+        entry = self._entry_finder.pop(item)
+        entry[-1] = None  # Mark as removed
+
+    def get(self):
+        while self._queue:
+            priority, count, item = heapq.heappop(self._queue)
+            if item is not None:
+                del self._entry_finder[item]
+                return item
+        return None
+
+    def is_empty(self):
+        return len(self._entry_finder) == 0
+
+def get_valid_neighbors(r, c, rows, cols, grid, obstacles):
+    neighbors = []
+    for dr, dc in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+        nr, nc = r + dr, c + dc
+        if (0 <= nr < rows and 0 <= nc < cols and 
+            grid[nr][nc] == 0 and (nr, nc) not in obstacles):
+            neighbors.append(((nr, nc), 1))
+    return neighbors
+
+def dijkstra(grid, obstacles, start_node, end_node):
+    # New: Incorporate obstacles into path planning
+    rows, cols = len(grid), len(grid[0])
+    if not (0 <= start_node[0] < rows and 0 <= start_node[1] < cols and 
+            grid[start_node[0]][start_node[1]] == 0 and start_node not in obstacles):
+        print(f"Dijkstra Error: Start node {start_node} is invalid or not on a pathable line.")
+        return []
+    if not (0 <= end_node[0] < rows and 0 <= end_node[1] < cols and 
+            grid[end_node[0]][end_node[1]] == 0 and end_node not in obstacles):
+        print(f"Dijkstra Error: End node {end_node} is invalid or not on a pathable line.")
+        return []
+
+    pq = HeapPriorityQueue()
+    pq.put(start_node, 0)
+    came_from = {start_node: None}
+    cost_so_far = {start_node: 0}
+    path_found = False
+    nodes_explored_count = 0
+
+    while not pq.is_empty():
+        current_node = pq.get()
+        nodes_explored_count += 1
+        if current_node == end_node:
+            path_found = True
+            break
+        for next_node, cost in get_valid_neighbors(current_node[0], current_node[1], rows, cols, grid, obstacles):
+            new_cost = cost_so_far[current_node] + cost
+            if next_node not in cost_so_far or new_cost < cost_so_far[next_node]:
+                cost_so_far[next_node] = new_cost
+                priority = new_cost
+                pq.put(next_node, priority)
+                came_from[next_node] = current_node
+    
+    if not path_found:
+        print(f"Dijkstra: No path found from {start_node} to {end_node} after exploring {nodes_explored_count} nodes.")
+        return []
+
+    path = []
+    node = end_node
+    while node is not None:
+        path.append(node)
+        node = came_from.get(node)
+    path.reverse()
+    
+    if path[0] != start_node:
+        print(f"Dijkstra WARNING: Path does not start at start_node! Starts at {path[0]}")
+        return []
+
+    print(f"Dijkstra: Path from {start_node} to {end_node} has {len(path)} steps (explored {nodes_explored_count}).")
+    return path
+
+def connect_to_hotspot(ssid, password):
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if not wlan.isconnected():
+        print(f'Connecting to hotspot: {ssid}')
+        wlan.connect(ssid, password)
+        timeout = 10
+        while not wlan.isconnected() and timeout > 0:
+            print('.', end='')
+            led.value(not led.value())
+            time.sleep(1)
+            timeout -= 1
+    if wlan.isconnected():
+        led.on()
+        print(f'\nConnected to hotspot. IP: {wlan.ifconfig()[0]}')
+        return wlan
+    else:
+        led.off()
+        print('\nHotspot connection failed.')
+        return None
+
+def connect_to_master(master_ip, master_port):
+    retry_count = 0
+    max_retries = 5  # New: Limit retry attempts
+    while retry_count < max_retries:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            print(f"Attempting to connect to master at {master_ip}:{master_port}...")
+            s.settimeout(5.0)
+            s.connect((master_ip, master_port))
+            s.settimeout(0.1)  # Non-blocking receive
+            print(f"Successfully connected to master at {master_ip}:{master_port}")
+            return s
+        except OSError as e:
+            print(f"Failed to connect to master: {e}")
+            s.close()
+            time.sleep(2 * (retry_count + 1))  # New: Exponential backoff
+            retry_count += 1
+    print(f"Max retries ({max_retries}) reached. Stopping.")
+    return None
+
+def get_action_from_path(robot_pos_on_path, world_theta_rad, webots_line_sensors_binary):
+    global planned_path, current_path_index, goal_grid_pos
+    if not planned_path or not robot_pos_on_path:
+        print("No path or robot position, stopping.")
+        return 'stop', robot_pos_on_path
+    if robot_pos_on_path == goal_grid_pos:
+        print("Robot at goal, stopping.")
+        return 'stop', robot_pos_on_path
+    if not (0 <= current_path_index < len(planned_path) - 1):
+        if current_path_index == len(planned_path) - 1 and robot_pos_on_path == planned_path[-1]:
+            print("End of path reached, stopping.")
+            return 'stop', robot_pos_on_path
+        print(f"WARN: Path index {current_path_index} out of bounds for path length {len(planned_path)}")
+        return 'stop', robot_pos_on_path
+    current_node_on_path = planned_path[current_path_index]
+    next_node_on_path = planned_path[current_path_index + 1]
+    if robot_pos_on_path != current_node_on_path:
+        print(f"WARN: Robot's path position {robot_pos_on_path} differs from indexed path node {current_node_on_path}")
+        try:
+            current_path_index = planned_path.index(robot_pos_on_path, current_path_index)
+            current_node_on_path = planned_path[current_path_index]
+            if current_path_index >= len(planned_path) - 1:
+                print("Reached end of path after reindexing, stopping.")
+                return 'stop', robot_pos_on_path
+            next_node_on_path = planned_path[current_path_index + 1]
+        except ValueError:
+            print(f"ERROR: Robot pos {robot_pos_on_path} not found in path")
+            return 'stop', robot_pos_on_path
+    dr = next_node_on_path[0] - current_node_on_path[0]
+    dc = next_node_on_path[1] - current_node_on_path[1]
+    target_theta_rad = None
+    if dc == 1 and dr == 0: target_theta_rad = 0.0
+    elif dc == -1 and dr == 0: target_theta_rad = math.pi
+    elif dr == 1 and dc == 0: target_theta_rad = math.pi / 2.0
+    elif dr == -1 and dc == 0: target_theta_rad = -math.pi / 2.0
+    else:
+        print(f"WARN: Non-adjacent nodes in path")
+        return 'stop', current_node_on_path
+    current_theta_norm = math.atan2(math.sin(world_theta_rad), math.cos(world_theta_rad))
+    angle_diff = target_theta_rad - current_theta_norm
+    angle_diff = math.atan2(math.sin(angle_diff), math.cos(angle_diff))
+    if abs(angle_diff) > ANGLE_THRESHOLD_RAD:
+        action = 'turn_left' if angle_diff > 0 else 'turn_right'
+        print(f"Angle diff {math.degrees(angle_diff):.1f} degrees, action: {action}")
+        return action, current_node_on_path
+    else:
+        print("Angle within threshold, moving forward.")
+        return 'forward', current_node_on_path
+
+def main():
+    global current_robot_grid_pos_actual, current_robot_grid_pos_path
+    global goal_grid_pos, planned_path, current_path_index
+    global path_needs_replan, last_replan_time, obstacles_grid
+
+    wlan = connect_to_hotspot(HOTSPOT_SSID, HOTSPOT_PASSWORD)
+    if not wlan or not wlan.isconnected():
+        print("Stopping. No WiFi.")
+        return
+
+    conn = connect_to_master(MASTER_IP, MASTER_PORT)
+    if not conn:
+        print("Stopping. No connection to master.")
+        return
+
+    while True:
+        current_time_ms = time.ticks_ms()
+        try:
+            # Receive data from master
+            data = conn.recv(512)
+            if data:
+                msg_parts = data.decode('utf-8').strip().split('\n')
+                for msg_part in msg_parts:
+                    if not msg_part:
+                        continue
+                    try:
+                        webots_data = json.loads(msg_part)
+                        if webots_data.get('type') == 'webots_status':
+                            print(f"Received webots_status: {webots_data}")
+                            new_robot_pos_actual = tuple(webots_data.get('robot_grid_pos'))
+                            new_goal_pos = tuple(webots_data.get('goal_grid_pos'))
+                            world_pose = webots_data.get('world_pose', {})
+                            robot_theta_rad = world_pose.get('theta_rad', 0.0)
+                            line_sensors_binary = webots_data.get('sensors_binary', [0,0,0])
+                            detected_obstacles = [tuple(obs) for obs in webots_data.get('detected_obstacles', [])]
+
+                            # New: Update obstacles in grid
+                            if detected_obstacles:
+                                print(f"Adding {len(detected_obstacles)} obstacles to grid")
+                                obstacles_grid.update(detected_obstacles)
+                                path_needs_replan = True
+
+                            if new_robot_pos_actual != current_robot_grid_pos_actual:
+                                current_robot_grid_pos_actual = new_robot_pos_actual
+                                if current_robot_grid_pos_path and \
+                                   (abs(current_robot_grid_pos_actual[0] - current_robot_grid_pos_path[0]) > 1 or \
+                                    abs(current_robot_grid_pos_actual[1] - current_robot_grid_pos_path[1]) > 1):
+                                    print(f"Robot deviated significantly")
+                                    path_needs_replan = True
+                                if current_robot_grid_pos_path is None:
+                                    current_robot_grid_pos_path = current_robot_grid_pos_actual
+
+                            if new_goal_pos != goal_grid_pos:
+                                goal_grid_pos = new_goal_pos
+                                path_needs_replan = True
+                                print(f"New goal: {goal_grid_pos}")
+
+                            if current_robot_grid_pos_actual is None:
+                                current_robot_grid_pos_actual = new_robot_pos_actual
+                            if current_robot_grid_pos_path is None:
+                                current_robot_grid_pos_path = new_robot_pos_actual
+                            if goal_grid_pos is None:
+                                goal_grid_pos = new_goal_pos
+                                path_needs_replan = True
+
+                            if path_needs_replan or (time.ticks_diff(current_time_ms, last_replan_time) > REPLAN_INTERVAL_MS):
+                                if current_robot_grid_pos_actual and goal_grid_pos:
+                                    print(f"Replanning from {current_robot_grid_pos_actual} to {goal_grid_pos}")
+                                    gc.collect()
+                                    new_path = dijkstra(grid_map, obstacles_grid, current_robot_grid_pos_actual, goal_grid_pos)
+                                    gc.collect()
+                                    if new_path:
+                                        planned_path = new_path
+                                        current_path_index = 0
+                                        if planned_path[0] == current_robot_grid_pos_actual:
+                                            current_robot_grid_pos_path = planned_path[0]
+                                        else:
+                                            print(f"WARN: Path starts at {planned_path[0]}, not {current_robot_grid_pos_actual}")
+                                            try:
+                                                current_path_index = planned_path.index(current_robot_grid_pos_actual)
+                                                current_robot_grid_pos_path = current_robot_grid_pos_actual
+                                            except ValueError:
+                                                current_robot_grid_pos_path = planned_path[0]
+                                                current_path_index = 0
+                                        path_needs_replan = False
+                                        last_replan_time = current_time_ms
+                                        print(f"New path with {len(planned_path)} steps")
+                                    else:
+                                        print("No path found")
+                                        planned_path = []
+                                        path_needs_replan = True
+
+                            action_to_send = 'stop'
+                            if planned_path and current_robot_grid_pos_path and goal_grid_pos:
+                                action_to_send, _ = get_action_from_path(
+                                    current_robot_grid_pos_path,
+                                    robot_theta_rad,
+                                    line_sensors_binary
+                                )
+                                if current_robot_grid_pos_actual == current_robot_grid_pos_path:
+                                    if action_to_send == 'forward' and current_path_index < len(planned_path) - 1:
+                                        next_node = planned_path[current_path_index + 1]
+                                        if current_robot_grid_pos_actual == next_node:
+                                            current_path_index += 1
+                                            current_robot_grid_pos_path = next_node
+                                            print(f"Advanced to index {current_path_index}")
+
+                            if current_robot_grid_pos_actual == goal_grid_pos:
+                                action_to_send = 'stop'
+                                print("🎉 Goal Reached!")
+                                planned_path = []
+                                path_needs_replan = False
+
+                            command = {
+                                'type': 'esp32_command',
+                                'action': action_to_send,
+                                'path': planned_path,
+                                'robot_pos_on_path_esp_thinks': list(current_robot_grid_pos_path) if current_robot_grid_pos_path else None,
+                                'current_path_idx_esp': current_path_index,
+                                'algorithm': 'Dijkstra'  # New: Explicitly specify algorithm
+                            }
+                            response_json = json.dumps(command) + '\n'
+                            print(f"Sending command: {response_json.strip()}")
+                            conn.sendall(response_json.encode('utf-8'))
+
+                    except json.JSONDecodeError as e:
+                        print(f"JSON Error: {e}")
+                    except Exception as e:
+                        print(f"Processing error: {e}")
+
+        except OSError as e:
+            if e.args[0] == 11:  # EAGAIN (no data available)
+                pass
+            else:
+                print(f"Connection error: {e}")
+                conn.close()
+                led.off()
+                conn = connect_to_master(MASTER_IP, MASTER_PORT)
+                if not conn:
+                    print("Reconnection failed. Stopping.")
+                    return
+                current_robot_grid_pos_actual = None
+                current_robot_grid_pos_path = None
+                planned_path = []
+                path_needs_replan = True
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            conn.close()
+            led.off()
+            conn = connect_to_master(MASTER_IP, MASTER_PORT)
+            if not conn:
+                print("Reconnection failed. Stopping.")
+                return
+            current_robot_grid_pos_actual = None
+            current_robot_grid_pos_path = None
+            planned_path = []
+            path_needs_replan = True
+
+        time.sleep(0.02)
+
+if __name__ == "__main__":
+    main()
