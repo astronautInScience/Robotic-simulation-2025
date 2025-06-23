@@ -1,21 +1,4 @@
-# webots_controller.py
-# Simon(CJ), Heba
-# Hardware-in-the-Loop Webots Controller with ESP32 Integration
-# Real-time path planning with sensor-based visualization and obstacle detection
-#
-# This script runs inside the Webots simulation environment. It controls the
-# simulated robot. Robot's pose (position and orientation) is *solely* derived
-# from wheel encoder data (odometry). It integrates camera vision for
-# additional obstacle detection.
-# It sends processed data to the ESP32 (which runs the D* Lite algorithm),
-# receives movement commands, and provides a real-time visualization.
-#
-# This version adds a comparison between the odometry-calculated pose and
-# Webots' internal ground truth pose, displaying the errors.
-#
-# Remember to set ESP32_IP_ADDRESS to the actual IP of your ESP32.
-
-from controller import Robot, DistanceSensor, Motor, Camera, PositionSensor, Node # Added Node import
+from controller import Robot, DistanceSensor, Motor, Camera, PositionSensor, GPS, InertialUnit # Added GPS, InertialUnit imports
 import socket
 import time
 import math
@@ -25,7 +8,7 @@ import json
 import numpy as np # Added for image processing
 
 # --- Network Configuration ---
-ESP32_IP_ADDRESS = "10.149.34.66"
+ESP32_IP_ADDRESS = ""
 ESP32_PORT = 8080
 
 # --- Robot Physical Parameters ---
@@ -632,12 +615,12 @@ class VisualizationManager:
     def _draw_goal_position(self):
         """Draw goal position marker."""
         goal_x, goal_z = CoordinateConverter.grid_to_world_center(GOAL_ROW, GOAL_COL)
-        if self.goal_marker is None: # Only draw if it doesn't exist (static)
+        # Ensure goal marker is only drawn once (it's static)
+        if self.goal_marker is None or not self.goal_marker.get_visible():
             self.goal_marker, = self.axis.plot(
                 goal_x, goal_z, 'g*', ms=15, mec='darkgreen', mew=1.5, zorder=9,
                 label='Goal Position' # Ensure label for legend
             )
-
 
     def _display_system_info(self, grid_position, line_sensors, num_obstacles_detected,
                              position_error, orientation_error): # Added error arguments
@@ -730,6 +713,8 @@ class TurnController:
             return base_speed - aggressive_diff, base_speed
         elif not left_sensor and not center_sensor and right_sensor:
             return base_speed, base_speed - aggressive_diff
+        elif left_sensor and center_sensor and right_sensor:
+            return base_speed * 0.7, base_speed * 0.7
         elif not any(line_sensors):
             # Line lost - return to search
             self.current_phase = 'SEARCHING_LINE'
@@ -802,10 +787,10 @@ class NetworkManager:
             self.is_connected = False
             return False
     
-    def receive_data(self):
+    def receive_data(self, buffer_size=1024): # Added buffer_size for clarity
         """Receive data from ESP32."""
         try:
-            response = self.client_socket.recv(1024)
+            response = self.client_socket.recv(buffer_size)
             if response:
                 messages = response.decode('utf-8').strip().split('\n')
                 return [msg for msg in messages if msg.strip()]
@@ -836,12 +821,27 @@ def initialize_robot_systems():
     robot = Robot()
     timestep = int(robot.getBasicTimeStep())
     
-    # Get the robot's main node for ground truth pose
-    # Assumes the script is a controller for the current robot node itself
-    robot_node = robot.getSelf() 
-    if robot_node is None:
-        print("Webots Error: Could not get robot's self node. Ground truth pose comparison will not work.")
-    
+    # --- GPS and InertialUnit for ground truth comparison ---
+    # IMPORTANT: These variables MUST be initialized to None to prevent NameError
+    gps_device = None
+    inertial_unit_device = None
+
+    # Retrieve devices. They will be None if not found in the world.
+    gps_device = robot.getDevice('gps')
+    if gps_device:
+        gps_device.enable(timestep)
+        print("Webots: GPS device initialized.")
+    else:
+        print("Webots Warning: GPS device 'gps' not found. Position ground truth comparison will not work.")
+
+    inertial_unit_device = robot.getDevice('inertial unit')
+    if inertial_unit_device:
+        inertial_unit_device.enable(timestep)
+        print("Webots: InertialUnit device initialized.")
+    else:
+        print("Webots Warning: InertialUnit device 'inertial unit' not found. Orientation ground truth comparison will not work.")
+    # --- End GPS/InertialUnit ---
+
     # Initialize motors
     left_motor = robot.getDevice('left wheel motor')
     right_motor = robot.getDevice('right wheel motor')
@@ -887,7 +887,7 @@ def initialize_robot_systems():
     # Make sure these are the sensors you intend for front-right, front-left, front-center
     obstacle_sensors = [s for i, s in enumerate(distance_sensors_all) if i in [0, 7, 5] and s is not None]
     if len(obstacle_sensors) != 3:
-        print("Webots Warning: Not all 3 specified obstacle sensors (ps0, ps7, ps5) were found.")
+        print("Webots Warning: Not all 3 specified obstacle sensors (ps0, ps7, ps5) were found for obstacle detection.")
 
     # Initialize Camera Device
     camera = robot.getDevice(CAMERA_NAME)
@@ -914,12 +914,19 @@ def initialize_robot_systems():
         'camera': camera,
         'actual_camera_width': actual_camera_width,
         'actual_camera_height': actual_camera_height,
-        'robot_node': robot_node # Return robot_node for ground truth access
+        'gps_device': gps_device, # Return GPS device
+        'inertial_unit_device': inertial_unit_device # Return InertialUnit device
     }
 
 
 def update_robot_odometry(world_pose, encoders, first_update):
     """Update robot position using wheel encoder odometry."""
+    # Ensure encoders are valid before proceeding
+    if not encoders['left_encoder'] or not encoders['right_encoder']:
+        print("Webots Error: Odometry cannot update, encoders not found.")
+        # Return current pose as-is, or indicate failure
+        return world_pose, encoders.get('prev_left', 0.0), encoders.get('prev_right', 0.0), first_update
+
     if first_update:
         prev_left = encoders['left_encoder'].getValue()
         prev_right = encoders['right_encoder'].getValue()
@@ -1034,7 +1041,7 @@ def main():
         camera_image_data = hardware['camera'].getImage() if hardware['camera'] else None
         
         # Update robot position using odometry
-        # Needs to check if encoders are valid first (handled in initialize_robot_systems, but robust check here too)
+        # Needs to check if encoders are valid first
         if hardware['left_encoder'] and hardware['right_encoder']:
             robot_world_pose, encoder_values['prev_left'], encoder_values['prev_right'], first_odometry_update = \
                 update_robot_odometry(robot_world_pose, {
@@ -1044,38 +1051,58 @@ def main():
                     'prev_right': encoder_values['prev_right']
                 }, first_odometry_update)
         else:
-            print("Webots: Encoders not ready, skipping odometry update.")
-            # Set odometry pose to NaN or a known error state if encoders are missing
-            robot_world_pose['x'] = float('nan')
-            robot_world_pose['z'] = float('nan')
-            robot_world_pose['theta'] = float('nan')
+            print("Webots: Encoders not ready for odometry. Robot pose will not be updated by odometry.")
+            # Set odometry pose to NaN or a known error state if encoders are missing.
+            # This will result in NaN errors if used for calculations, which is desired behavior if odometry is broken.
+            if not math.isnan(robot_world_pose['x']): # Only if not already NaN
+                robot_world_pose['x'] = float('nan')
+                robot_world_pose['z'] = float('nan')
+                robot_world_pose['theta'] = float('nan')
+
 
         current_grid_position = CoordinateConverter.world_to_grid(robot_world_pose['x'], robot_world_pose['z'])
         
-        # --- Get Webots Ground Truth Pose and Calculate Errors ---
-        if hardware['robot_node']:
-            gt_position = hardware['robot_node'].getPosition() # Returns a Vec3f: [x, y, z]
-            gt_orientation_matrix = hardware['robot_node'].getOrientation() # Returns a Rotation (list of 9 floats for 3x3 matrix)
+        # --- Get Webots Ground Truth Pose from GPS/InertialUnit and Calculate Errors ---
+        gt_x, gt_z, gt_theta = float('nan'), float('nan'), float('nan') # Initialize with NaN (Not a Number)
 
-            # Extract yaw (theta) from the 3x3 rotation matrix (assuming Y-axis is up)
-            # gt_orientation_matrix elements: [R00, R01, R02, R10, R11, R12, R20, R21, R22]
-            # Yaw (rotation about Y) is atan2(R20, R00) if robot X-axis points (R00, R10, R20)
-            # This is correct for our odometry's theta convention (angle from World X to Robot X, towards World Z)
-            gt_theta = math.atan2(gt_orientation_matrix[6], gt_orientation_matrix[0])
+        # Get ground truth position from GPS
+        if hardware['gps_device']: # Check if device exists before trying to read
+            gps_values = hardware['gps_device'].getValues() # [x, y, z]
+            # Webots GPS gives X, Y (vertical), Z. We need X and Z for our 2D ground plane.
+            gt_x = gps_values[0] 
+            gt_z = gps_values[2] 
+        else:
+            # Print warning only once or less frequently to avoid console spam
+            if iteration_count % 100 == 0:
+                print("Webots: GPS device not available for ground truth position.")
 
-            # Calculate position error (Euclidean distance on XZ plane)
-            # Note: Webots' getPosition() returns [x, y, z] where y is vertical. We use x and z for ground plane.
+        # Get ground truth orientation from InertialUnit
+        if hardware['inertial_unit_device']: # Check if device exists before trying to read
+            # InertialUnit provides roll, pitch, yaw. Yaw (heading) is typically the 3rd element (index 2).
+            # This is the rotation around the Y-axis.
+            rpy_values = hardware['inertial_unit_device'].getRollPitchYaw()
+            gt_theta = rpy_values[2] # Yaw is the third component (index 2)
+        else:
+            if iteration_count % 100 == 0:
+                print("Webots: InertialUnit device not available for ground truth orientation.")
+
+
+        # Calculate position error (Euclidean distance on XZ plane) if ground truth is valid
+        if not math.isnan(gt_x) and not math.isnan(gt_z) and \
+           not math.isnan(robot_world_pose['x']) and not math.isnan(robot_world_pose['z']):
             current_position_error = math.sqrt(
-                (robot_world_pose['x'] - gt_position[0])**2 +
-                (robot_world_pose['z'] - gt_position[2])**2 
+                (robot_world_pose['x'] - gt_x)**2 +
+                (robot_world_pose['z'] - gt_z)**2 
             )
+        else:
+            current_position_error = float('nan') # Error cannot be calculated if data is missing
 
-            # Calculate orientation error (shortest angle difference)
+        # Calculate orientation error (shortest angle difference) if ground truth is valid
+        if not math.isnan(gt_theta) and not math.isnan(robot_world_pose['theta']):
             angle_diff = robot_world_pose['theta'] - gt_theta
             current_orientation_error = math.atan2(math.sin(angle_diff), math.cos(angle_diff))
         else:
-            current_position_error = float('nan') # Not a Number if GT pose unavailable
-            current_orientation_error = float('nan')
+            current_orientation_error = float('nan') # Error cannot be calculated if data is missing
         
         # Process obstacle detection (no rate limit here; process every step to be responsive)
         new_obstacles, processed_camera_image = obstacle_detector.process_sensor_readings(
@@ -1141,9 +1168,9 @@ def main():
                     # Use the path from ESP32, convert tuples back to lists for consistency if needed by visualization
                     # The ESP32 is sending `path: nav_controller.planned_path` which is a list of tuples already.
                     planned_path = esp_data.get('path', planned_path) 
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
                 # print(f"Webots JSON Decode Error from ESP32: {e}. Message: {message}")
-                pass # Ignore malformed JSON messages
+                pass # Ignore malformed JSON messages, or print for debugging during development
             except Exception as e:
                 print(f"Webots Error processing ESP32 command: {e}. Message: {message}")
         
@@ -1191,8 +1218,13 @@ def main():
         if iteration_count % 100 == 0:
             connection_status = "Connected" if network_manager.is_connected else "Disconnected"
             sensor_status = "Line Detected" if any(line_detected) else "No Line"
+            
+            # Format error strings to handle NaN gracefully
+            pos_err_str = f"{current_position_error:.3f}" if not math.isnan(current_position_error) else "N/A"
+            orient_err_str = f"{math.degrees(current_orientation_error):.1f}" if not math.isnan(current_orientation_error) else "N/A"
+
             print(f"Status: ESP32 {connection_status} | {sensor_status} | Grid: {current_grid_position} | "
-                  f"Pos Error: {current_position_error:.3f} m | Orient Error: {math.degrees(current_orientation_error):.1f} deg") # Print errors
+                  f"Pos Error: {pos_err_str} m | Orient Error: {orient_err_str} deg") # Print errors
             
     # Cleanup
     network_manager.close_connection()
