@@ -1,14 +1,14 @@
-from controller import Robot, DistanceSensor, Motor, Camera, PositionSensor, GPS, InertialUnit # Added GPS, InertialUnit imports
+from controller import Robot, DistanceSensor, Motor, Camera, PositionSensor, GPS, InertialUnit
 import socket
 import time
 import math
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, FancyArrowPatch, Patch
 import json
-import numpy as np # Added for image processing
+import numpy as np 
 
 # --- Network Configuration ---
-ESP32_IP_ADDRESS = ""
+ESP32_IP_ADDRESS = "10.149.34.57"
 ESP32_PORT = 8080
 
 # --- Robot Physical Parameters ---
@@ -16,11 +16,18 @@ WHEEL_RADIUS = 0.0205
 AXLE_LENGTH = 0.05720
 
 # --- Grid Configuration ---
+# *** THESE ARE THE VALUES YOU NEED TO CALIBRATE ***
 GRID_ROWS = 15
 GRID_COLS = 21
 GRID_CELL_SIZE = 0.05099
 GRID_ORIGIN_X = 0.050002
-GRID_ORIGIN_Z = -0.639e-05
+GRID_ORIGIN_Z = -0.639e-05 # World Z-coordinate of the center of grid cell (0,0)
+
+# --- TEMPORARY DEBUG CONSTANTS FOR GRID CALIBRATION ---
+# Set these to a grid cell you want to check against in Webots.
+# For example, (5,5) means row 5, col 5 in your Python world_grid.
+DEBUG_GRID_ROW = 0 # Try (0,0) first, or (2,20) if that's where robot starts
+DEBUG_GRID_COL = 0 # Try (0,0) first, or (2,20) if that's where robot starts
 
 # --- Navigation Parameters ---
 GOAL_ROW = 14
@@ -33,14 +40,11 @@ DISTANCE_SENSOR_THRESHOLD = 110
 OBSTACLE_DETECTION_ENABLED = True
 
 # --- Camera Configuration & Obstacle Detection ---
-CAMERA_NAME = 'camera' # Default camera device name in Webots
-# These will be read from the actual camera object, but provide defaults for the class init.
-DEFAULT_CAMERA_WIDTH = 40 
-DEFAULT_CAMERA_HEIGHT = 1 
-# Threshold for camera-based obstacle detection:
-# Tune these values based on your simulation environment.
-CAMERA_BRIGHTNESS_THRESHOLD = 50 # If average pixel value in ROI is less than this (dark obstacle)
-CAMERA_VARIANCE_THRESHOLD = 1000 # If pixel value variance in ROI is greater than this (textured obstacle)
+CAMERA_NAME = 'camera' 
+DEFAULT_CAMERA_WIDTH = 64 # Changed for better visibility
+DEFAULT_CAMERA_HEIGHT = 64 # Changed for better visibility
+CAMERA_BRIGHTNESS_THRESHOLD = 50 
+CAMERA_VARIANCE_THRESHOLD = 1000 
 
 
 # --- Movement Control Parameters ---
@@ -57,10 +61,10 @@ MODERATE_CORRECTION_DIFFERENTIAL = FORWARD_SPEED * 1.2
 
 # --- Starting Position Configuration ---
 INITIAL_GRID_ROW = 2
-INITIAL_GRID_COL = 20
+INITIAL_GRID_COL = 16
 
 # --- Visualization Update Rate
-VIZ_UPDATE_INTERVAL_SEC = 0.1 # Update visualization every 0.1 seconds (10 Hz) to reduce load
+VIZ_UPDATE_INTERVAL_SEC = 0.1 
 
 # World grid definition (0 = Black Line, 1 = White Space) - Visual only, for background in matplotlib
 world_grid = [
@@ -88,8 +92,18 @@ class CoordinateConverter:
     @staticmethod
     def world_to_grid(world_x, world_z):
         """Convert world coordinates to grid coordinates."""
+        # Calculate col based on distance from origin X, then divide by cell size
         col = round((world_x - GRID_ORIGIN_X) / GRID_CELL_SIZE)
+        # Calculate row based on distance from origin Z, then divide by cell size
+        # Note: Depending on your world's Z-axis direction and grid (0,0) placement,
+        # you might need to adjust the sign here or subtract GRID_ORIGIN_Z.
+        # For a (0,0) at bottom-left with increasing Z upwards: round((world_z - GRID_ORIGIN_Z) / GRID_CELL_SIZE)
+        # For a (0,0) at top-left with increasing Z downwards (common in Webots for maps):
+        # row = round((world_z - GRID_ORIGIN_Z) / GRID_CELL_SIZE) (and make sure GRID_ORIGIN_Z is for the top)
+        # However, if (0,0) is bottom-left and Z increases upwards, and your map array rows increase "upwards"
+        # then the below is correct.
         row = round((world_z - GRID_ORIGIN_Z) / GRID_CELL_SIZE)
+
         col = max(0, min(col, GRID_COLS - 1))
         row = max(0, min(row, GRID_ROWS - 1))
         return row, col
@@ -97,6 +111,7 @@ class CoordinateConverter:
     @staticmethod
     def grid_to_world_center(row, col):
         """Convert grid coordinates to world coordinates (center of cell)."""
+        # Calculate world X and Z based on origin and cell size
         world_x = GRID_ORIGIN_X + col * GRID_CELL_SIZE
         world_z = GRID_ORIGIN_Z + row * GRID_CELL_SIZE
         return world_x, world_z
@@ -106,6 +121,7 @@ class CameraObstacleDetector:
     """
     Analyzes raw camera images to detect general obstacles in defined regions
     (front-left, front-center, front-right) and map them to grid cells.
+    Uses both brightness and variance thresholds for robust detection.
     """
     def __init__(self, camera_width, camera_height, brightness_threshold, variance_threshold):
         self.camera_width = camera_width
@@ -114,57 +130,46 @@ class CameraObstacleDetector:
         self.variance_threshold = variance_threshold
         
         # Define Regions of Interest (ROIs) for obstacle detection
-        # These are pixel coordinates relative to the camera image (0,0 is top-left)
+        # These are pixel coordinates (row_start, row_end, col_start, col_end)
         # Assuming the camera is looking slightly downwards, so obstacles appear at the bottom of the image.
-        
-        # Example ROIs: bottom 20% of image, split into 3 horizontal sections.
-        # Adjusted height to start from 80% down to 100% (bottom of image)
+        # Bottom 20% of image, split into 3 horizontal sections.
         row_start = int(self.camera_height * 0.8) 
         row_end = self.camera_height              
+        col_width = self.camera_width // 3 
         
-        col_width = self.camera_width // 3 # Divide width into 3 regions
-        
-        self.roi_regions = {
+        self.roi_regions_pixel_coords = {
             'front_left': (row_start, row_end, 0, col_width),
             'front_center': (row_start, row_end, col_width, 2 * col_width),
             'front_right': (row_start, row_end, 2 * col_width, self.camera_width)
         }
-        print(f"CameraObstacleDetector: Initialized with resolution {self.camera_width}x{self.camera_height}. ROIs defined: {self.roi_regions}")
+        print(f"CameraObstacleDetector: Initialized with resolution {self.camera_width}x{self.camera_height}. ROIs defined: {self.roi_regions_pixel_coords}")
 
     def process_image(self, camera_image_data, robot_grid_position, robot_orientation_rad):
         """
         Processes a raw camera image to detect obstacles in predefined regions.
         Converts detected regions into corresponding grid cell obstacles.
-
-        Args:
-            camera_image_data (bytes): Raw camera image data (RGB, 3 bytes per pixel).
-            robot_grid_position (tuple): Current robot (row, col) grid position.
-            robot_orientation_rad (float): Current robot orientation (radians).
-
-        Returns:
-            tuple: (list[list], np.array) - List of detected obstacle (row, col) grid positions,
-                   and the processed grayscale image data (NumPy array) for visualization.
         """
         detected_grid_obstacles = []
-        gray_image = None # Initialize to None in case of error
+        detected_roi_pixel_coords = [] # New: to pass back for visualization
+        gray_image = None 
 
         if camera_image_data is None:
-            return detected_grid_obstacles, gray_image
+            return detected_grid_obstacles, detected_roi_pixel_coords, gray_image
 
         try:
             bytes_per_pixel = len(camera_image_data) / (self.camera_width * self.camera_height)
         except ZeroDivisionError:
             print("Camera Error: Camera width or height is zero, cannot process image data.")
-            return detected_grid_obstacles, gray_image
+            return detected_grid_obstacles, detected_roi_pixel_coords, gray_image
 
         if bytes_per_pixel == 3.0: # RGB image
             try:
                 image_np = np.frombuffer(camera_image_data, np.uint8).reshape(
                     (self.camera_height, self.camera_width, 3))
-                gray_image = np.mean(image_np, axis=2) # Convert to grayscale for brightness check
+                gray_image = np.mean(image_np, axis=2).astype(np.uint8) # Convert to grayscale and ensure uint8
             except ValueError as e:
                 print(f"Camera Error: Could not reshape RGB camera image data. {e}. Data length: {len(camera_image_data)}")
-                return detected_grid_obstacles, gray_image
+                return detected_grid_obstacles, detected_roi_pixel_coords, gray_image
         elif bytes_per_pixel == 1.0: # Grayscale image
             try:
                 image_np = np.frombuffer(camera_image_data, np.uint8).reshape(
@@ -172,79 +177,69 @@ class CameraObstacleDetector:
                 gray_image = image_np # Already grayscale
             except ValueError as e:
                 print(f"Camera Error: Could not reshape Grayscale camera image data. {e}. Data length: {len(camera_image_data)}")
-                return detected_grid_obstacles, gray_image
-        elif bytes_per_pixel == 4.0: # RGBA image (newly added for 4.0 bytes/pixel)
+                return detected_grid_obstacles, detected_roi_pixel_coords, gray_image
+        elif bytes_per_pixel == 4.0: # RGBA image 
             try:
                 image_np = np.frombuffer(camera_image_data, np.uint8).reshape(
                     (self.camera_height, self.camera_width, 4))
-                # Convert to grayscale by averaging RGB channels, ignoring the Alpha channel (index 3)
-                gray_image = np.mean(image_np[:, :, :3], axis=2) 
+                gray_image = np.mean(image_np[:, :, :3], axis=2).astype(np.uint8) # Convert to grayscale, ignoring alpha
             except ValueError as e:
                 print(f"Camera Error: Could not reshape RGBA camera image data. {e}. Data length: {len(camera_image_data)}")
-                return detected_grid_obstacles, gray_image
+                return detected_grid_obstacles, detected_roi_pixel_coords, gray_image
         else:
             print(f"Camera Error: Unexpected bytes per pixel: {bytes_per_pixel}. Expected 1, 3, or 4. Data length: {len(camera_image_data)}")
-            return detected_grid_obstacles, gray_image
+            return detected_grid_obstacles, detected_roi_pixel_coords, gray_image
 
-        # Proceed only if gray_image was successfully created
         if gray_image is None:
-            return detected_grid_obstacles, gray_image
+            return detected_grid_obstacles, detected_roi_pixel_coords, gray_image
 
 
-        for region_name, (r_start, r_end, c_start, c_end) in self.roi_regions.items():
+        for region_name, (r_start, r_end, c_start, c_end) in self.roi_regions_pixel_coords.items():
             roi = gray_image[r_start:r_end, c_start:c_end]
             
-            if roi.size == 0: # Avoid division by zero if ROI is empty
+            if roi.size == 0: 
                 continue
 
             mean_brightness = np.mean(roi)
+            pixel_variance = np.var(roi) 
 
-            # Detection logic: If region is significantly darker than expected background
-            if mean_brightness < self.brightness_threshold: # Example: looking for dark obstacles
+            if mean_brightness < self.brightness_threshold or pixel_variance > self.variance_threshold: 
                 obstacle_grid_pos = self._map_camera_region_to_grid(
                     robot_grid_position, robot_orientation_rad, region_name)
                 if obstacle_grid_pos:
                     detected_grid_obstacles.append(list(obstacle_grid_pos))
+                    detected_roi_pixel_coords.append((r_start, r_end, c_start, c_end)) 
         
-        return detected_grid_obstacles, gray_image # Return both detected obstacles and the processed image
+        return detected_grid_obstacles, detected_roi_pixel_coords, gray_image 
 
     def _map_camera_region_to_grid(self, robot_row_col, robot_orientation_rad, region_name):
         """
         Maps a camera detection region (e.g., 'front_center') to a specific grid cell
         relative to the robot's current pose.
-        This mapping depends on camera mounting and robot size.
         """
         r_row, r_col = robot_row_col
         
-        # Normalize orientation to 0-360 degrees
         theta_degrees = math.degrees(robot_orientation_rad) % 360
         if theta_degrees < 0: theta_degrees += 360
 
-        delta_row, delta_col = 0, 0 # Default to no change
+        delta_row, delta_col = 0, 0 
 
-        # These offsets need careful tuning for your specific camera placement and robot size.
-        # They represent how many grid cells "ahead" or "to the side" an obstacle in that camera region is.
-
-        # Facing Right (Yaw ~ 0 deg) (positive X in Webots world)
         if -45 < theta_degrees <= 45: 
-            if region_name == 'front_center': delta_row, delta_col = 0, 1 # One cell right
-            elif region_name == 'front_right': delta_row, delta_col = -1, 1 # One cell right, one cell up (relative to map)
-            elif region_name == 'front_left': delta_row, delta_col = 1, 1 # One cell right, one cell down (relative to map)
-        # Facing Down (Yaw ~ 90 deg) (positive Z in Webots world)
+            if region_name == 'front_center': delta_row, delta_col = 0, 1 
+            elif region_name == 'front_right': delta_row, delta_col = -1, 1 
+            elif region_name == 'front_left': delta_row, delta_col = 1, 1 
         elif 45 < theta_degrees <= 135:
-            if region_name == 'front_center': delta_row, delta_col = 1, 0 # One cell down
-            elif region_name == 'front_right': delta_row, delta_col = 1, -1 # One cell down, one cell left
-            elif region_name == 'front_left': delta_row, delta_col = 1, 1 # One cell down, one cell right
-        # Facing Left (Yaw ~ 180 deg) (negative X in Webots world)
+            if region_name == 'front_center': delta_row, delta_col = 1, 0
+            elif region_name == 'front_right': delta_row, delta_col = 1, -1 
+            elif region_name == 'front_left': delta_row, delta_col = 1, 1 
         elif 135 < theta_degrees <= 225:
-            if region_name == 'front_center': delta_row, delta_col = 0, -1 # One cell left
-            elif region_name == 'front_right': delta_row, delta_col = 1, -1 # One cell left, one cell down
-            elif region_name == 'front_left': delta_row, delta_col = -1, -1 # One cell left, one cell up
-        # Facing Up (Yaw ~ 270 deg) (negative Z in Webots world)
+            if region_name == 'front_center': delta_row, delta_col = 0, -1
+            elif region_name == 'front_right': delta_row, delta_col = 1, -1 
+            elif region_name == 'front_left': delta_row, delta_col = -1, -1 
         elif 225 < theta_degrees <= 315:
-            if region_name == 'front_center': delta_row, delta_col = -1, 0 # One cell up
-            elif region_name == 'front_right': delta_row, delta_col = -1, 1 # One cell up, one cell right
-            elif region_name == 'front_left': delta_row, delta_col = -1, -1 # One cell up, one cell left
+            if region_name == 'front_center': delta_row, delta_col = -1, 0
+            elif region_name == 'front_right': delta_row, delta_col = -1, 1 
+            elif region_name == 'front_left': delta_row, delta_col = -1, -1 
         
         obstacle_row, obstacle_col = r_row + delta_row, r_col + delta_col
         if 0 <= obstacle_row < GRID_ROWS and 0 <= obstacle_col < GRID_COLS:
@@ -257,35 +252,23 @@ class ObstacleDetector:
     Handle obstacle detection using distance sensors AND camera.
     """
     
-    def __init__(self, camera_obstacle_detector_instance): # Now takes camera detector
+    def __init__(self, camera_obstacle_detector_instance): 
         self.detected_obstacles = set()
-        self.recent_obstacles = [] # For transmission to ESP32
-        self.camera_obstacle_detector = camera_obstacle_detector_instance # Store instance
+        self.recent_obstacles = [] 
+        self.camera_obstacle_detector = camera_obstacle_detector_instance 
     
     def process_sensor_readings(self, robot_world_pose, robot_orientation, distance_values, camera_data):
         """Process distance sensor readings and camera data to detect obstacles."""
         new_obstacles_this_step = []
         processed_camera_image = None
+        detected_camera_roi_pixel_coords = [] 
 
         current_row, current_col = CoordinateConverter.world_to_grid(
             robot_world_pose['x'], robot_world_pose['z'])
         
         # --- Process Distance Sensor Detections ---
         if OBSTACLE_DETECTION_ENABLED:
-            # Process three sensors: front, front-left, front-right (from your original code)
-            # Assuming distance_values are ordered as [ps0, ps1, ps2, ..., ps7]
-            # And that obstacle_sensors in main are mapped to:
-            # obstacle_sensors = [distance_sensors[0], distance_sensors[7], distance_sensors[5]]
-            # This means: ps0 (front-right), ps7 (front-left), ps5 (back-right, often used as 'front' in some e-puck setups, or ps2 for front-center)
-            # Re-confirming your current obstacle_sensors list: [distance_sensors[0], distance_sensors[7], distance_sensors[5]]
-            # If ps5 is meant to be front-center, then sensor_index=2 is correct.
-            
-            # Remapping for clarity based on your provided obstacle_sensors list:
-            # sensor_index 0 -> ps0 (front-right)
-            # sensor_index 1 -> ps7 (front-left)
-            # sensor_index 2 -> ps5 (could be front-center or other, depending on setup)
-            # Let's use generic names to align with _calculate_obstacle_position.
-            sensor_logical_names = ['front_right', 'front_left', 'front_center'] # Adjust this if your ps5 is not front-center
+            sensor_logical_names = ['front_right', 'front_left', 'front_center'] 
 
             for i, distance_value in enumerate(distance_values):
                 if distance_value > DISTANCE_SENSOR_THRESHOLD:
@@ -296,54 +279,51 @@ class ObstacleDetector:
                         if obstacle_position not in self.detected_obstacles:
                             new_obstacles_this_step.append(obstacle_position)
                             self.detected_obstacles.add(obstacle_position)
-                            self.recent_obstacles.append(obstacle_position) # Add to recent for ESP32
+                            self.recent_obstacles.append(obstacle_position) 
 
         # --- Process Camera Detections ---
         if self.camera_obstacle_detector and camera_data:
-            camera_detected_grid_obstacles, processed_camera_image = self.camera_obstacle_detector.process_image(
-                camera_data, (current_row, current_col), robot_orientation)
+            camera_detected_grid_obstacles, detected_camera_roi_pixel_coords, processed_camera_image = \
+                self.camera_obstacle_detector.process_image(
+                    camera_data, (current_row, current_col), robot_orientation)
             
             for obs_pos_list in camera_detected_grid_obstacles:
-                obs_pos_tuple = tuple(obs_pos_list) # Convert to tuple for set operations
+                obs_pos_tuple = tuple(obs_pos_list) 
                 if obs_pos_tuple not in self.detected_obstacles:
                     new_obstacles_this_step.append(obs_pos_tuple)
                     self.detected_obstacles.add(obs_pos_tuple)
-                    self.recent_obstacles.append(obs_pos_tuple) # Add to recent for ESP32
+                    self.recent_obstacles.append(obs_pos_tuple) 
 
-        return new_obstacles_this_step, processed_camera_image # Return both new obstacles and image
+        return new_obstacles_this_step, processed_camera_image, detected_camera_roi_pixel_coords 
 
     def _calculate_obstacle_position(self, robot_row, robot_col, orientation, sensor_logical_name):
         """Calculate obstacle position based on robot orientation and sensor."""
         theta_degrees = math.degrees(orientation) % 360
         if theta_degrees < 0: theta_degrees += 360
         
-        delta_row, delta_col = 0, 0 # Default to no change
+        delta_row, delta_col = 0, 0 
 
-        # These offsets predict the cell an obstacle would be in based on robot facing direction.
-        # This mapping is crucial and should accurately reflect your robot's sensor placement.
-        
-        # Robot facing RIGHT (Yaw ~ 0 deg) (matches odometry theta=0)
         if -45 < theta_degrees <= 45: 
             if sensor_logical_name == 'front_center': delta_row, delta_col = 0, 1 
             elif sensor_logical_name == 'front_right': delta_row, delta_col = -1, 1 
             elif sensor_logical_name == 'front_left': delta_row, delta_col = 1, 1 
-        # Robot facing DOWN (Yaw ~ 90 deg) (matches odometry theta=pi/2)
         elif 45 < theta_degrees <= 135:
             if sensor_logical_name == 'front_center': delta_row, delta_col = 1, 0
             elif sensor_logical_name == 'front_right': delta_row, delta_col = 1, -1 
             elif sensor_logical_name == 'front_left': delta_row, delta_col = 1, 1 
-        # Robot facing LEFT (Yaw ~ 180 deg) (matches odometry theta=pi)
         elif 135 < theta_degrees <= 225:
             if sensor_logical_name == 'front_center': delta_row, delta_col = 0, -1
             elif sensor_logical_name == 'front_right': delta_row, delta_col = 1, -1 
             elif sensor_logical_name == 'front_left': delta_row, delta_col = -1, -1 
-        # Robot facing UP (Yaw ~ 270 deg) (matches odometry theta=-pi/2 or 3pi/2)
         elif 225 < theta_degrees <= 315:
-            if sensor_logical_name == 'front_center': delta_row, delta_col = -1, 0
-            elif sensor_logical_name == 'front_right': delta_row, delta_col = -1, 1 
-            elif sensor_logical_name == 'front_left': delta_row, delta_col = -1, -1 
+            if region_name == 'front_center': delta_row, delta_col = -1, 0
+            elif region_name == 'front_right': delta_row, delta_col = -1, 1 
+            elif region_name == 'front_left': delta_row, delta_col = -1, -1 
         
-        return (robot_row + delta_row, robot_col + delta_col)
+        obstacle_row, obstacle_col = robot_row + delta_row, robot_col + delta_col
+        if 0 <= obstacle_row < GRID_ROWS and 0 <= obstacle_col < GRID_COLS:
+            return (obstacle_row, obstacle_col)
+        return None
     
     def _is_valid_position(self, position):
         """Check if position is within grid bounds."""
@@ -356,8 +336,6 @@ class ObstacleDetector:
         self.recent_obstacles.clear()
         return obstacles
     
-    # Removed add_recent_obstacles as it's now internal to process_sensor_readings
-
 
 class VisualizationManager:
     """
@@ -370,66 +348,67 @@ class VisualizationManager:
         self.axis = None # For the main map plot
         self.camera_ax = None # New axis for camera feed
         self.camera_image_artist = None # Artist object for updating camera image efficiently
+        self.camera_roi_rects = [] # New: to store patches for ROI highlights
 
         self.robot_trail = []
         self.planned_path = []
-        self.obstacle_cells_for_viz = set() # Copy of detected obstacles for visualization
+        self.obstacle_cells_for_viz = set() 
         
-        # Specific Line2D/Patch objects that will be updated or removed
         self.robot_position_marker = None
         self.robot_orientation_arrow = None
         self.current_waypoint_marker = None
         self.goal_marker = None 
-        self.info_text = None # System info text, now includes errors
+        self.info_text_obj = None 
         
         self.robot_trail_line = None
         self.planned_path_line = None
-    
+        self.last_sim_time = 0.0
+        self.last_update_iteration_count = 0
+
     def initialize_display(self, camera_width, camera_height):
         """Initialize matplotlib visualization with multiple subplots."""
-        plt.ion() # Turn on interactive mode
+        plt.ion() 
         
-        # Create a figure with two subplots: one for the map, one for the camera
-        self.figure, (self.axis, self.camera_ax) = plt.subplots(1, 2, figsize=(18, 9), gridspec_kw={'width_ratios': [2, 1]}) # Map is wider
+        self.figure, (self.axis, self.camera_ax) = plt.subplots(1, 2, figsize=(18, 9), gridspec_kw={'width_ratios': [2, 1]}) 
         
         # --- Configure Map Subplot ---
-        self.axis.set_aspect('equal') # Ensure square grid cells
+        self.axis.set_aspect('equal') 
         self.axis.set_title('Hardware-in-the-Loop Navigation System (Map)', fontsize=16, fontweight='bold')
         self.axis.set_xlabel('World X (m)', fontsize=12)
         self.axis.set_ylabel('World Z (m)', fontsize=12)
         
         self._draw_grid_lines()
         self._setup_display_limits()
-        self._create_legend() # Legend on the map subplot
+        self._create_legend() 
+        self._draw_goal_position() 
 
         # --- Configure Camera Subplot ---
         self.camera_ax.set_title('Robot Camera Feed (Grayscale)', fontsize=14, fontweight='bold')
-        self.camera_ax.set_xticks([]) # Hide x ticks
-        self.camera_ax.set_yticks([]) # Hide y ticks
-        self.camera_ax.set_aspect('auto') # Let camera aspect ratio be determined by image size
+        self.camera_ax.set_xticks([]) 
+        self.camera_ax.set_yticks([]) 
+        self.camera_ax.set_aspect('auto') 
         
-        # Initialize the camera image artist with dummy data
         dummy_image = np.zeros((camera_height, camera_width), dtype=np.uint8)
         self.camera_image_artist = self.camera_ax.imshow(dummy_image, cmap='gray', vmin=0, vmax=255)
         
-        plt.tight_layout(rect=[0, 0, 0.95, 1]) # Adjust layout to give some space to the right
+        self.figure.suptitle('Webots Robot Controller Dashboard', fontsize=20, fontweight='bold')
+
+        plt.tight_layout(rect=[0, 0, 0.95, 0.96]) 
         plt.show(block=False)
-        plt.pause(0.01) # Small pause to allow plot to render
+        plt.pause(0.01) 
     
     def _draw_grid_lines(self):
         """Draw grid overlay on visualization."""
-        # Horizontal lines
         for row in range(GRID_ROWS + 1):
             z_coord = GRID_ORIGIN_Z + row * GRID_CELL_SIZE
             self.axis.plot([GRID_ORIGIN_X, GRID_ORIGIN_X + GRID_COLS * GRID_CELL_SIZE], 
-                           [z_coord, z_coord], 'k-', alpha=0.2, lw=0.5, zorder=1) # Lower zorder
+                           [z_coord, z_coord], 'k-', alpha=0.2, lw=0.5, zorder=1) 
         
-        # Vertical lines
         for col in range(GRID_COLS + 1):
             x_coord = GRID_ORIGIN_X + col * GRID_CELL_SIZE
             self.axis.plot([x_coord, x_coord], 
                            [GRID_ORIGIN_Z, GRID_ORIGIN_Z + GRID_ROWS * GRID_CELL_SIZE], 
-                           'k-', alpha=0.2, lw=0.5, zorder=1) # Lower zorder
+                           'k-', alpha=0.2, lw=0.5, zorder=1) 
     
     def _setup_display_limits(self):
         """Set appropriate display limits with margin."""
@@ -442,54 +421,62 @@ class VisualizationManager:
         legend_elements = [
             Patch(facecolor='black', alpha=0.7, label='Black Line Path'),
             Patch(facecolor='lightgrey', alpha=0.3, label='White Space'),
-            Patch(facecolor='red', alpha=0.7, label='Detected Obstacle'),
+            Patch(facecolor='red', alpha=0.7, label='Detected Obstacle (Grid)'), 
             plt.Line2D([0], [0], color='cyan', lw=2, label='Robot Trail'),
             plt.Line2D([0], [0], color='magenta', marker='o', ms=5, ls='--', lw=2, label='Planned Path'),
             plt.Line2D([0], [0], color='red', marker='o', ms=8, ls='', label='Robot Position'),
-            plt.Line2D([0], [0], color='green', marker='*', ms=12, ls='', label='Goal Position')
+            plt.Line2D([0], [0], color='green', marker='*', ms=12, ls='', label='Goal Position'),
+            Patch(facecolor='yellow', edgecolor='orange', alpha=0.3, linewidth=3, label='Current Robot Cell (No Line)'),
+            Patch(facecolor='green', edgecolor='green', alpha=0.5, linewidth=3, label='Current Robot Cell (On Line)'),
         ]
-        self.axis.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1))
+        self.axis.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9)
     
     def update_display(self, robot_world_pose, robot_grid_position, line_sensors, planned_path, 
-                       all_detected_obstacles, processed_camera_image=None, 
-                       position_error=0.0, orientation_error=0.0): # Added error arguments
+                       all_detected_obstacles, current_time, timestep, iteration_count,
+                       processed_camera_image=None, detected_camera_roi_pixel_coords=None, 
+                       position_error=0.0, orientation_error=0.0,
+                       left_motor_speed=0.0, right_motor_speed=0.0, effective_command="stop", is_connected=False):
         """Update visualization with current system state."""
         if self.figure is None:
-            # Initialize with actual camera dimensions if available, otherwise defaults
-            # This is handled in main() before calling update_display for the first time.
-            # So, the initialize_display will be called once with correct camera_width/height.
-            self.initialize_display(DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT) # Placeholder, will be corrected in main
+            self.initialize_display(DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT) 
         
         self._clear_dynamic_elements()
-        self.obstacle_cells_for_viz = all_detected_obstacles # Update the set for drawing
+        self.obstacle_cells_for_viz = all_detected_obstacles 
         self._draw_grid_cells()
         self._update_robot_trail(robot_world_pose)
         self._draw_planned_path(planned_path)
         self._draw_robot_state(robot_world_pose, robot_grid_position, line_sensors)
-        self._draw_goal_position()
-        self._display_system_info(robot_grid_position, line_sensors, len(self.obstacle_cells_for_viz),
-                                  position_error, orientation_error) # Pass errors to info display
         
-        # --- Update Camera Display ---
+        time_diff = current_time - self.last_sim_time
+        iter_diff = iteration_count - self.last_update_iteration_count
+        fps = iter_diff / time_diff if time_diff > 0 else 0
+
+        self._display_system_info(robot_grid_position, line_sensors, len(self.obstacle_cells_for_viz),
+                                  position_error, orientation_error,
+                                  left_motor_speed, right_motor_speed, effective_command,
+                                  is_connected, current_time, fps, timestep)
+        
         if processed_camera_image is not None and self.camera_image_artist is not None:
-            # Set the new data for the image artist
             self.camera_image_artist.set_data(processed_camera_image)
-            # Update the extent if the dimensions might change (though they shouldn't for Webots camera)
-            self.camera_image_artist.set_extent([0, processed_camera_image.shape[1], processed_camera_image.shape[0], 0])
-            # Ensure proper scaling for the camera axes
             self.camera_ax.set_xlim(0, processed_camera_image.shape[1])
-            self.camera_ax.set_ylim(processed_camera_image.shape[0], 0) # Invert y-axis for standard image display
+            self.camera_ax.set_ylim(processed_camera_image.shape[0], 0) 
             
+            self._draw_camera_rois_on_feed(detected_camera_roi_pixel_coords)
+
         plt.draw()
         plt.pause(0.001)
+
+        self.last_sim_time = current_time
+        self.last_update_iteration_count = iteration_count
     
     def _clear_dynamic_elements(self):
         """Clear dynamic visualization elements for redraw."""
-        # Clear patches (rectangles for grid cells, arrows)
-        for patch in self.axis.patches[:]: # Iterate over a copy of the list
-            patch.remove()
+        for patch in self.axis.patches[:]: 
+            if isinstance(patch, Rectangle) and patch.get_edgecolor() not in ('gray', 'black'): 
+                 patch.remove()
+            elif isinstance(patch, FancyArrowPatch):
+                patch.remove()
         
-        # Clear specific Line2D objects managed by instance variables
         if self.robot_trail_line:
             self.robot_trail_line.remove()
             self.robot_trail_line = None
@@ -502,28 +489,27 @@ class VisualizationManager:
             self.robot_position_marker.remove()
             self.robot_position_marker = None
         
-        if self.current_waypoint_marker: # This was not managed explicitly before, adding for clarity
+        if self.current_waypoint_marker: 
             self.current_waypoint_marker.remove()
             self.current_waypoint_marker = None
 
-        # self.robot_orientation_arrow is a FancyArrowPatch, which is a subclass of Patch,
-        # so it's handled by clearing self.axis.patches. Explicitly setting to None here
-        # ensures its reference is correctly reset.
         self.robot_orientation_arrow = None
 
-        # Clear existing text elements (system info)
-        if self.info_text:
-            self.info_text.remove()
-            self.info_text = None
+        if self.info_text_obj: 
+            self.info_text_obj.remove()
+            self.info_text_obj = None
+
+        for rect in self.camera_roi_rects:
+            rect.remove()
+        self.camera_roi_rects = [] 
 
     def _draw_grid_cells(self):
-        """Draw grid cells with appropriate coloring."""
+        """Draw grid cells with appropriate coloring and obstacle markers."""
         for row in range(GRID_ROWS):
             for col in range(GRID_COLS):
                 center_x, center_z = CoordinateConverter.grid_to_world_center(row, col)
                 
-                # Determine cell color based on obstacle status
-                if (row, col) in self.obstacle_cells_for_viz: # Use the viz-specific set
+                if (row, col) in self.obstacle_cells_for_viz: 
                     color, alpha = 'red', 0.7
                 else:
                     color = 'black' if world_grid[row][col] == 0 else 'lightgrey'
@@ -533,7 +519,7 @@ class VisualizationManager:
                     (center_x - GRID_CELL_SIZE/2, center_z - GRID_CELL_SIZE/2),
                     GRID_CELL_SIZE, GRID_CELL_SIZE,
                     facecolor=color, alpha=alpha, edgecolor='gray', linewidth=0.5,
-                    zorder=2 # Ensure grid cells are below markers/paths
+                    zorder=2 
                 )
                 self.axis.add_patch(rect)
     
@@ -544,7 +530,6 @@ class VisualizationManager:
             self.robot_trail.pop(0)
         
         if len(self.robot_trail) > 1:
-            # Create a new line object each time, the old one is removed by _clear_dynamic_elements
             self.robot_trail_line, = self.axis.plot(
                 [p[0] for p in self.robot_trail], 
                 [p[1] for p in self.robot_trail], 
@@ -553,26 +538,23 @@ class VisualizationManager:
     
     def _draw_planned_path(self, planned_path):
         """Display planned path if available."""
-        self.planned_path = planned_path # Update the stored path
+        self.planned_path = planned_path 
         if planned_path and len(planned_path) > 1:
             path_world = [CoordinateConverter.grid_to_world_center(r, c) for r, c in planned_path]
             if path_world:
                 path_x, path_z = zip(*path_world)
-                # Create a new line object each time
                 self.planned_path_line, = self.axis.plot(
                     path_x, path_z, 'mo--', lw=2, ms=5, alpha=0.8, zorder=4,
-                    label='Planned Path' # Ensure label for legend
+                    label='Planned Path' 
                 )
     
     def _draw_robot_state(self, robot_world_pose, robot_grid_position, line_sensors):
         """Draw robot position and orientation."""
-        # Robot position marker
         self.robot_position_marker, = self.axis.plot(
             robot_world_pose['x'], robot_world_pose['z'], 'ro', ms=10, 
-            mec='darkred', mew=1, zorder=7 # Ensure marker is on top
+            mec='darkred', mew=1, zorder=7 
         )
         
-        # Orientation arrow
         arrow_length = GRID_CELL_SIZE * 0.7
         dx = arrow_length * math.cos(robot_world_pose['theta'])
         dz = arrow_length * math.sin(robot_world_pose['theta'])
@@ -580,11 +562,10 @@ class VisualizationManager:
             (robot_world_pose['x'], robot_world_pose['z']), 
             (robot_world_pose['x'] + dx, robot_world_pose['z'] + dz),
             arrowstyle='->', mutation_scale=15, color='darkred', lw=2,
-            zorder=8 # Ensure arrow is on top of marker
+            zorder=8 
         )
         self.axis.add_patch(arrow)
         
-        # Highlight current grid cell
         if robot_grid_position:
             self._highlight_current_cell(robot_grid_position, line_sensors)
     
@@ -600,47 +581,72 @@ class VisualizationManager:
             (center_x - GRID_CELL_SIZE/2, center_z - GRID_CELL_SIZE/2),
             GRID_CELL_SIZE, GRID_CELL_SIZE,
             edgecolor=highlight_color, facecolor=highlight_color, 
-            alpha=highlight_alpha, linewidth=3, zorder=6 # Ensure highlight is above grid cells
+            alpha=highlight_alpha, linewidth=3, zorder=6 
         )
         self.axis.add_patch(highlight_rect)
         
-        # Status text
         sensor_status = "ON LINE" if sensors_active else "NO LINE"
         status_color = 'green' if sensors_active else 'orange'
         
         self.axis.text(center_x, center_z + GRID_CELL_SIZE * 0.6, sensor_status, 
                        ha='center', va='bottom', fontsize=7, color=status_color, weight='bold',
-                       bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8), zorder=9) # On top
+                       bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8), zorder=9) 
     
     def _draw_goal_position(self):
-        """Draw goal position marker."""
+        """Draw goal position marker (called once during initialization)."""
         goal_x, goal_z = CoordinateConverter.grid_to_world_center(GOAL_ROW, GOAL_COL)
-        # Ensure goal marker is only drawn once (it's static)
-        if self.goal_marker is None or not self.goal_marker.get_visible():
-            self.goal_marker, = self.axis.plot(
-                goal_x, goal_z, 'g*', ms=15, mec='darkgreen', mew=1.5, zorder=9,
-                label='Goal Position' # Ensure label for legend
-            )
+        self.goal_marker, = self.axis.plot(
+            goal_x, goal_z, 'g*', ms=15, mec='darkgreen', mew=1.5, zorder=9,
+            label='Goal Position' 
+        )
+
+    def _draw_camera_rois_on_feed(self, detected_roi_pixel_coords):
+        """Draw rectangles on the camera feed for detected ROIs."""
+        for r_start, r_end, c_start, c_end in detected_roi_pixel_coords:
+            rect = Rectangle((c_start, r_start), 
+                             c_end - c_start,    
+                             r_end - r_start,    
+                             edgecolor='lime', linewidth=2, facecolor='none',
+                             zorder=10) 
+            self.camera_roi_rects.append(rect) 
+            self.camera_ax.add_patch(rect)
 
     def _display_system_info(self, grid_position, line_sensors, num_obstacles_detected,
-                             position_error, orientation_error): # Added error arguments
-        """Display system information panel."""
+                             position_error, orientation_error,
+                             left_motor_speed, right_motor_speed, effective_command,
+                             is_connected, current_time, fps, timestep):
+        """Display comprehensive system information panel."""
         line_status = "ON BLACK LINE" if any(line_sensors) else "NO LINE DETECTED"
-        info_background = 'lightgreen' if any(line_sensors) else 'lightcoral'
         
-        info_text = (f"Grid Position: {grid_position} -> Goal: ({GOAL_ROW},{GOAL_COL})\n"
-                     f"Sensor Status: {line_status}\n"
-                     f"Obstacles Detected: {num_obstacles_detected}\n"
-                     f"Pos Error (m): {position_error:.3f}\n" # Display position error
-                     f"Orient Error (deg): {math.degrees(orientation_error):.1f}") # Display orientation error in degrees
+        connection_status_str = "CONNECTED" if is_connected else "DISCONNECTED"
+        connection_color = 'limegreen' if is_connected else 'salmon'
+
+        pos_err_str = f"{position_error:.3f}" if not math.isnan(position_error) else "N/A"
+        orient_err_str = f"{math.degrees(orientation_error):.1f}" if not math.isnan(orientation_error) else "N/A"
+
+        info_text = (
+            f"--- SYSTEM STATUS ---\n"
+            f"Sim Time: {current_time:.2f} s (FPS: {fps:.1f})\n"
+            f"Webots Timestep: {timestep} ms\n"
+            f"Network: {connection_status_str}\n"
+            f"Robot Grid Pos: {grid_position} (Goal: ({GOAL_ROW},{GOAL_COL}))\n"
+            f"Line Sensors: {line_status}\n"
+            f"Detected Obstacles: {num_obstacles_detected}\n"
+            f"Odometry Pos Error: {pos_err_str} m\n"
+            f"Odometry Orient Error: {orient_err_str} deg\n"
+            f"Effective Command: {effective_command.replace('_', ' ').upper()}\n"
+            f"Motor Speeds (L/R): {left_motor_speed:.2f} / {right_motor_speed:.2f}"
+        )
         
-        # Update or create the text element
-        if self.info_text is None:
-            self.info_text = self.axis.text(0.02, 0.98, info_text,
+        info_background = connection_color 
+        
+        if self.info_text_obj is None:
+            self.info_text_obj = self.axis.text(0.02, 0.98, info_text,
                                             transform=self.axis.transAxes, va='top', fontsize=8,
-                                            bbox=dict(boxstyle='round,pad=0.4', facecolor=info_background, alpha=0.8))
+                                            bbox=dict(boxstyle='round,pad=0.4', facecolor=info_background, alpha=0.9, edgecolor='black'))
         else:
-            self.info_text.set_text(info_text)
+            self.info_text_obj.set_text(info_text)
+            self.info_text_obj.set_bbox(dict(boxstyle='round,pad=0.4', facecolor=info_background, alpha=0.9, edgecolor='black'))
 
 
 class TurnController:
@@ -701,7 +707,6 @@ class TurnController:
         aggressive_diff = AGGRESSIVE_CORRECTION_DIFFERENTIAL * (base_speed / FORWARD_SPEED)
         
         if not left_sensor and center_sensor and not right_sensor:
-            # Perfect center - turn complete
             self.current_phase = 'NONE'
             self.active_command = None
             return base_speed * 0.3, base_speed * 0.3
@@ -716,14 +721,12 @@ class TurnController:
         elif left_sensor and center_sensor and right_sensor:
             return base_speed * 0.7, base_speed * 0.7
         elif not any(line_sensors):
-            # Line lost - return to search
             self.current_phase = 'SEARCHING_LINE'
             self.phase_start_time = current_time
             return self._calculate_turn_speeds(0.5, 0.9)
         else:
             return base_speed * 0.7, base_speed * 0.7
         
-        # Timeout check
         if current_time - self.phase_start_time > MAX_ADJUST_DURATION:
             self.current_phase = 'NONE'
             self.active_command = None
@@ -736,7 +739,7 @@ class TurnController:
         
         if self.active_command == 'turn_left':
             return inner_speed, outer_speed
-        else:  # turn_right
+        else:  
             return outer_speed, inner_speed
     
     def is_turning(self):
@@ -770,7 +773,7 @@ class NetworkManager:
             self.is_connected = True
             print("ESP32 Connection Established")
             return True
-        except Exception as e: # Catch all exceptions during connection attempt
+        except Exception as e: 
             print(f"Webots Error (Connect): {e}")
             self.is_connected = False
             self.client_socket = None
@@ -787,19 +790,17 @@ class NetworkManager:
             self.is_connected = False
             return False
     
-    def receive_data(self, buffer_size=1024): # Added buffer_size for clarity
+    def receive_data(self, buffer_size=1024): 
         """Receive data from ESP32."""
         try:
             response = self.client_socket.recv(buffer_size)
             if response:
                 messages = response.decode('utf-8').strip().split('\n')
                 return [msg for msg in messages if msg.strip()]
-            return [] # Empty response implies connection closed by ESP32
+            return [] 
         except socket.timeout:
-            return [] # No data yet, not an error
+            return [] 
         except Exception as e:
-            # Catch ConnectionResetError (104) or other issues
-            # if the client_socket is invalid, it means connection lost.
             print(f"Webots Error (Receive): {e}")
             self.is_connected = False
             return []
@@ -822,11 +823,9 @@ def initialize_robot_systems():
     timestep = int(robot.getBasicTimeStep())
     
     # --- GPS and InertialUnit for ground truth comparison ---
-    # IMPORTANT: These variables MUST be initialized to None to prevent NameError
     gps_device = None
     inertial_unit_device = None
 
-    # Retrieve devices. They will be None if not found in the world.
     gps_device = robot.getDevice('gps')
     if gps_device:
         gps_device.enable(timestep)
@@ -853,14 +852,14 @@ def initialize_robot_systems():
     left_encoder = robot.getDevice('left wheel sensor')
     right_encoder = robot.getDevice('right wheel sensor')
     for encoder in [left_encoder, right_encoder]:
-        if encoder: # Ensure encoder exists before enabling
+        if encoder: 
             encoder.enable(timestep)
         else:
             print(f"Webots Error: Encoder not found. Check 'left wheel sensor' or 'right wheel sensor'.")
             
     # Initialize ground sensors
     ground_sensors = []
-    line_sensor_names = ['gs0', 'gs1', 'gs2'] # Consistent list name
+    line_sensor_names = ['gs0', 'gs1', 'gs2'] 
     for name in line_sensor_names:
         sensor = robot.getDevice(name)
         if sensor:
@@ -870,7 +869,7 @@ def initialize_robot_systems():
             print(f"Webots Warning: Line sensor '{name}' not found. Check your robot model.")
     
     # Initialize distance sensors
-    distance_sensors_all = [] # Get all distance sensors first
+    distance_sensors_all = [] 
     sensor_names_all = ['ps0', 'ps1', 'ps2', 'ps3', 'ps4', 'ps5', 'ps6', 'ps7']
     for name in sensor_names_all:
         sensor = robot.getDevice(name)
@@ -879,12 +878,8 @@ def initialize_robot_systems():
             distance_sensors_all.append(sensor)
         else:
             print(f"Webots Warning: Distance sensor '{name}' not found.")
-            # Append None or handle it if you need a specific count
-            distance_sensors_all.append(None) # To maintain index alignment if needed
+            distance_sensors_all.append(None) 
 
-    # Select specific sensors for obstacle detection based on their indices in the full list
-    # Your original code used indices 0, 7, 5 which correspond to ps0, ps7, ps5
-    # Make sure these are the sensors you intend for front-right, front-left, front-center
     obstacle_sensors = [s for i, s in enumerate(distance_sensors_all) if i in [0, 7, 5] and s is not None]
     if len(obstacle_sensors) != 3:
         print("Webots Warning: Not all 3 specified obstacle sensors (ps0, ps7, ps5) were found for obstacle detection.")
@@ -902,6 +897,15 @@ def initialize_robot_systems():
     else:
         print(f"Webots Error: Camera '{CAMERA_NAME}' not found. Camera-based obstacle detection/display will not work.")
     
+    # DEBUG: Print world coordinates for a specific grid cell based on current constants
+    debug_world_x, debug_world_z = CoordinateConverter.grid_to_world_center(DEBUG_GRID_ROW, DEBUG_GRID_COL)
+    print(f"\n--- GRID CALIBRATION DEBUG INFO ---")
+    print(f"Python code believes grid cell ({DEBUG_GRID_ROW},{DEBUG_GRID_COL}) has its center at World X: {debug_world_x:.5f}, Z: {debug_world_z:.5f}")
+    print(f"You should place a small object in Webots at this exact (X, Z) coordinate and check if it aligns with the dashboard's grid.")
+    print(f"Current GRID_CELL_SIZE: {GRID_CELL_SIZE:.5f}, GRID_ORIGIN_X: {GRID_ORIGIN_X:.5f}, GRID_ORIGIN_Z: {GRID_ORIGIN_Z:.5f}")
+    print(f"-----------------------------------\n")
+
+
     return {
         'robot': robot,
         'timestep': timestep,
@@ -910,21 +914,19 @@ def initialize_robot_systems():
         'left_encoder': left_encoder,
         'right_encoder': right_encoder,
         'ground_sensors': ground_sensors,
-        'obstacle_sensors': obstacle_sensors, # Passed as filtered list of actual sensors
+        'obstacle_sensors': obstacle_sensors, 
         'camera': camera,
         'actual_camera_width': actual_camera_width,
         'actual_camera_height': actual_camera_height,
-        'gps_device': gps_device, # Return GPS device
-        'inertial_unit_device': inertial_unit_device # Return InertialUnit device
+        'gps_device': gps_device, 
+        'inertial_unit_device': inertial_unit_device 
     }
 
 
 def update_robot_odometry(world_pose, encoders, first_update):
     """Update robot position using wheel encoder odometry."""
-    # Ensure encoders are valid before proceeding
     if not encoders['left_encoder'] or not encoders['right_encoder']:
         print("Webots Error: Odometry cannot update, encoders not found.")
-        # Return current pose as-is, or indicate failure
         return world_pose, encoders.get('prev_left', 0.0), encoders.get('prev_right', 0.0), first_update
 
     if first_update:
@@ -938,11 +940,9 @@ def update_robot_odometry(world_pose, encoders, first_update):
     left_diff = current_left - encoders['prev_left']
     right_diff = current_right - encoders['prev_right']
     
-    # Calculate movement
     distance = (left_diff * WHEEL_RADIUS + right_diff * WHEEL_RADIUS) / 2.0
     rotation = (right_diff * WHEEL_RADIUS - left_diff * WHEEL_RADIUS) / AXLE_LENGTH
     
-    # Update position
     world_pose['x'] += distance * math.cos(world_pose['theta'] + rotation / 2.0)
     world_pose['z'] += distance * math.sin(world_pose['theta'] + rotation / 2.0)
     world_pose['theta'] = math.atan2(
@@ -955,11 +955,10 @@ def update_robot_odometry(world_pose, encoders, first_update):
 
 def calculate_line_following_speeds(line_sensors):
     """Calculate motor speeds for line following behavior."""
-    # Ensure line_sensors has 3 elements, if not, fill with 0s
     if len(line_sensors) < 3:
         line_sensors_padded = line_sensors + [0] * (3 - len(line_sensors))
     else:
-        line_sensors_padded = line_sensors[:3] # Use only first 3 if more are present
+        line_sensors_padded = line_sensors[:3] 
 
     left_sensor, center_sensor, right_sensor = line_sensors_padded
     base_speed = FORWARD_SPEED
@@ -976,7 +975,7 @@ def calculate_line_following_speeds(line_sensors):
         return base_speed, base_speed - AGGRESSIVE_CORRECTION_DIFFERENTIAL
     elif left_sensor and center_sensor and right_sensor:
         return base_speed * 0.7, base_speed * 0.7
-    elif not any(line_sensors_padded): # Check padded version
+    elif not any(line_sensors_padded): 
         return base_speed * 0.2, base_speed * 0.2
     else:
         return base_speed * 0.3, base_speed * 0.3
@@ -997,7 +996,7 @@ def main():
     robot_world_pose = {
         'x': CoordinateConverter.grid_to_world_center(INITIAL_GRID_ROW, INITIAL_GRID_COL)[0],
         'z': CoordinateConverter.grid_to_world_center(INITIAL_GRID_ROW, INITIAL_GRID_COL)[1],
-        'theta': math.pi / 2.0 # Initial orientation for the odometry tracker
+        'theta': math.pi / 2.0 
     }
     
     current_grid_position = CoordinateConverter.world_to_grid(robot_world_pose['x'], robot_world_pose['z'])
@@ -1008,40 +1007,33 @@ def main():
     iteration_count = 0
     last_connection_attempt = 0
     last_data_transmission = 0
-    last_viz_update_time = 0.0 # Control visualization update rate
+    last_viz_update_time = 0.0 
     first_odometry_update = True
     encoder_values = {'prev_left': 0.0, 'prev_right': 0.0}
     
-    # Obstacle detector instance, now passes the camera detector
     camera_obs_detector_instance = CameraObstacleDetector(
         hardware['actual_camera_width'], hardware['actual_camera_height'], 
         CAMERA_BRIGHTNESS_THRESHOLD, CAMERA_VARIANCE_THRESHOLD
     )
     obstacle_detector = ObstacleDetector(camera_obs_detector_instance)
 
-    # Variables for pose comparison
     current_position_error = 0.0
     current_orientation_error = 0.0
+    left_motor_speed, right_motor_speed = 0.0, 0.0 
 
     print("Hardware-in-the-Loop Navigation System Started")
     
-    # Main control loop
     while hardware['robot'].step(hardware['timestep']) != -1:
         current_time = hardware['robot'].getTime()
         iteration_count += 1
         
-        # Read sensor data
         line_sensor_values = [s.getValue() for s in hardware['ground_sensors']]
-        line_detected = [1 if v < LINE_THRESHOLD else 0 for v in line_sensor_values] # Binary status for line following
+        line_detected = [1 if v < LINE_THRESHOLD else 0 for v in line_sensor_values] 
         
-        # Ensure obstacle_sensors is not empty before attempting to get values
         obstacle_sensor_values = [s.getValue() for s in hardware['obstacle_sensors'] if s is not None]
         
-        # Get raw camera image data
         camera_image_data = hardware['camera'].getImage() if hardware['camera'] else None
         
-        # Update robot position using odometry
-        # Needs to check if encoders are valid first
         if hardware['left_encoder'] and hardware['right_encoder']:
             robot_world_pose, encoder_values['prev_left'], encoder_values['prev_right'], first_odometry_update = \
                 update_robot_odometry(robot_world_pose, {
@@ -1051,43 +1043,24 @@ def main():
                     'prev_right': encoder_values['prev_right']
                 }, first_odometry_update)
         else:
-            print("Webots: Encoders not ready for odometry. Robot pose will not be updated by odometry.")
-            # Set odometry pose to NaN or a known error state if encoders are missing.
-            # This will result in NaN errors if used for calculations, which is desired behavior if odometry is broken.
-            if not math.isnan(robot_world_pose['x']): # Only if not already NaN
+            if not math.isnan(robot_world_pose['x']): 
                 robot_world_pose['x'] = float('nan')
                 robot_world_pose['z'] = float('nan')
                 robot_world_pose['theta'] = float('nan')
 
-
         current_grid_position = CoordinateConverter.world_to_grid(robot_world_pose['x'], robot_world_pose['z'])
         
-        # --- Get Webots Ground Truth Pose from GPS/InertialUnit and Calculate Errors ---
-        gt_x, gt_z, gt_theta = float('nan'), float('nan'), float('nan') # Initialize with NaN (Not a Number)
+        gt_x, gt_z, gt_theta = float('nan'), float('nan'), float('nan') 
 
-        # Get ground truth position from GPS
-        if hardware['gps_device']: # Check if device exists before trying to read
-            gps_values = hardware['gps_device'].getValues() # [x, y, z]
-            # Webots GPS gives X, Y (vertical), Z. We need X and Z for our 2D ground plane.
+        if hardware['gps_device']: 
+            gps_values = hardware['gps_device'].getValues() 
             gt_x = gps_values[0] 
             gt_z = gps_values[2] 
-        else:
-            # Print warning only once or less frequently to avoid console spam
-            if iteration_count % 100 == 0:
-                print("Webots: GPS device not available for ground truth position.")
-
-        # Get ground truth orientation from InertialUnit
-        if hardware['inertial_unit_device']: # Check if device exists before trying to read
-            # InertialUnit provides roll, pitch, yaw. Yaw (heading) is typically the 3rd element (index 2).
-            # This is the rotation around the Y-axis.
+        
+        if hardware['inertial_unit_device']: 
             rpy_values = hardware['inertial_unit_device'].getRollPitchYaw()
-            gt_theta = rpy_values[2] # Yaw is the third component (index 2)
-        else:
-            if iteration_count % 100 == 0:
-                print("Webots: InertialUnit device not available for ground truth orientation.")
+            gt_theta = rpy_values[2] 
 
-
-        # Calculate position error (Euclidean distance on XZ plane) if ground truth is valid
         if not math.isnan(gt_x) and not math.isnan(gt_z) and \
            not math.isnan(robot_world_pose['x']) and not math.isnan(robot_world_pose['z']):
             current_position_error = math.sqrt(
@@ -1095,38 +1068,36 @@ def main():
                 (robot_world_pose['z'] - gt_z)**2 
             )
         else:
-            current_position_error = float('nan') # Error cannot be calculated if data is missing
+            current_position_error = float('nan') 
 
-        # Calculate orientation error (shortest angle difference) if ground truth is valid
         if not math.isnan(gt_theta) and not math.isnan(robot_world_pose['theta']):
             angle_diff = robot_world_pose['theta'] - gt_theta
             current_orientation_error = math.atan2(math.sin(angle_diff), math.cos(angle_diff))
         else:
-            current_orientation_error = float('nan') # Error cannot be calculated if data is missing
+            current_orientation_error = float('nan') 
         
-        # Process obstacle detection (no rate limit here; process every step to be responsive)
-        new_obstacles, processed_camera_image = obstacle_detector.process_sensor_readings(
+        new_obstacles, processed_camera_image, detected_camera_roi_pixel_coords = obstacle_detector.process_sensor_readings(
             robot_world_pose, robot_world_pose['theta'], obstacle_sensor_values, camera_image_data)
         
-        # Handle network communication
         if not network_manager.is_connected:
             if current_time - last_connection_attempt > 3.0:
                 network_manager.establish_connection()
             else:
-                # Stop robot while waiting for reconnection attempt
                 hardware['left_motor'].setVelocity(0.0)
                 hardware['right_motor'].setVelocity(0.0)
-            # Update visualization even if disconnected, but show current error/status
+            
             if current_time - last_viz_update_time > VIZ_UPDATE_INTERVAL_SEC:
                 visualization.update_display(robot_world_pose, current_grid_position, line_detected, planned_path,
-                                             obstacle_detector.detected_obstacles, # Use the full set for map drawing
-                                             processed_camera_image,
-                                             current_position_error, current_orientation_error)
+                                             obstacle_detector.detected_obstacles, 
+                                             current_time, hardware['timestep'], iteration_count, 
+                                             processed_camera_image, detected_camera_roi_pixel_coords, 
+                                             current_position_error, current_orientation_error,
+                                             left_motor_speed, right_motor_speed, esp32_command, 
+                                             network_manager.is_connected) 
                 last_viz_update_time = current_time
-            continue # Skip the rest of the loop if not connected
+            continue 
         
-        # Send data to ESP32
-        if current_time - last_data_transmission > 0.1: # Send status every 0.1 seconds
+        if current_time - last_data_transmission > 0.1: 
             navigation_data = {
                 'type': 'webots_status',
                 'robot_grid_pos': list(current_grid_position),
@@ -1137,19 +1108,17 @@ def main():
                     'theta_rad': round(robot_world_pose['theta'], 3)
                 },
                 'sensors_binary': line_detected,
-                'detected_obstacles': obstacle_detector.get_recent_obstacles() # Send only newly detected obstacles
+                'detected_obstacles': obstacle_detector.get_recent_obstacles() 
             }
             
             if not network_manager.send_data(navigation_data):
-                # Connection lost during send, handled by NetworkManager and loop continues to reconnect logic
                 hardware['left_motor'].setVelocity(0.0)
                 hardware['right_motor'].setVelocity(0.0)
                 continue
             last_data_transmission = current_time
         
-        # Receive commands from ESP32
         received_messages = network_manager.receive_data()
-        if not network_manager.is_connected: # Check again in case receive_data lost connection
+        if not network_manager.is_connected: 
             hardware['left_motor'].setVelocity(0.0)
             hardware['right_motor'].setVelocity(0.0)
             continue
@@ -1159,38 +1128,30 @@ def main():
                 esp_data = json.loads(message)
                 if esp_data.get('type') == 'esp32_command':
                     new_command = esp_data.get('action', 'stop')
-                    # If ESP32 changes from a turn command, reset Webots' turn controller
                     if (new_command != esp32_command and 
                         esp32_command in ['turn_left', 'turn_right'] and 
                         new_command not in ['turn_left', 'turn_right']):
                         turn_controller.reset()
                     esp32_command = new_command
-                    # Use the path from ESP32, convert tuples back to lists for consistency if needed by visualization
-                    # The ESP32 is sending `path: nav_controller.planned_path` which is a list of tuples already.
                     planned_path = esp_data.get('path', planned_path) 
             except json.JSONDecodeError as e:
-                # print(f"Webots JSON Decode Error from ESP32: {e}. Message: {message}")
-                pass # Ignore malformed JSON messages, or print for debugging during development
+                pass 
             except Exception as e:
                 print(f"Webots Error processing ESP32 command: {e}. Message: {message}")
         
-        # Determine effective command based on sensor state and ESP32 command
         sensors_detect_line = any(line_detected)
         
-        effective_command = esp32_command # Default to ESP32's command
-        if turn_controller.is_turning(): # If Webots is in an active turn phase
-            effective_command = turn_controller.active_command # Keep executing the turn
-            if esp32_command == 'stop': # Allow ESP32 to force a stop
+        effective_command = esp32_command 
+        if turn_controller.is_turning(): 
+            effective_command = turn_controller.active_command 
+            if esp32_command == 'stop': 
                 turn_controller.reset()
                 effective_command = 'stop'
         elif sensors_detect_line and esp32_command not in ['turn_left', 'turn_right', 'stop']:
-            # If on a line and not actively turning by ESP32, prioritize line following
             effective_command = 'forward' 
         elif not sensors_detect_line and esp32_command == 'forward':
-            # If off line and ESP32 says forward, initiate a search turn
-            effective_command = 'turn_left' # Default turn direction if line lost
+            effective_command = 'turn_left' 
 
-        # Execute movement commands
         left_speed, right_speed = 0.0, 0.0
         
         if effective_command == 'stop':
@@ -1202,29 +1163,29 @@ def main():
             turn_controller.initiate_turn(effective_command, current_time)
             left_speed, right_speed = turn_controller.execute_turn(effective_command, line_detected, current_time)
         
-        # Apply motor velocities
         hardware['left_motor'].setVelocity(left_speed)
         hardware['right_motor'].setVelocity(right_speed)
-        
-        # Update visualization (rate-limited)
+        left_motor_speed, right_motor_speed = left_speed, right_speed 
+
         if current_time - last_viz_update_time > VIZ_UPDATE_INTERVAL_SEC:
             visualization.update_display(robot_world_pose, current_grid_position, line_detected, planned_path,
-                                         obstacle_detector.detected_obstacles, # Use the full set for map drawing
-                                         processed_camera_image,
-                                         current_position_error, current_orientation_error) # Pass errors
+                                         obstacle_detector.detected_obstacles, 
+                                         current_time, hardware['timestep'], iteration_count, 
+                                         processed_camera_image, detected_camera_roi_pixel_coords, 
+                                         current_position_error, current_orientation_error,
+                                         left_motor_speed, right_motor_speed, effective_command, 
+                                         network_manager.is_connected) 
             last_viz_update_time = current_time
         
-        # Status reporting (rate-limited)
-        if iteration_count % 100 == 0:
+        if iteration_count % 200 == 0: 
             connection_status = "Connected" if network_manager.is_connected else "Disconnected"
             sensor_status = "Line Detected" if any(line_detected) else "No Line"
             
-            # Format error strings to handle NaN gracefully
             pos_err_str = f"{current_position_error:.3f}" if not math.isnan(current_position_error) else "N/A"
             orient_err_str = f"{math.degrees(current_orientation_error):.1f}" if not math.isnan(current_orientation_error) else "N/A"
 
-            print(f"Status: ESP32 {connection_status} | {sensor_status} | Grid: {current_grid_position} | "
-                  f"Pos Error: {pos_err_str} m | Orient Error: {orient_err_str} deg") # Print errors
+            print(f"Sim Time: {current_time:.2f}s | Status: ESP32 {connection_status} | {sensor_status} | Grid: {current_grid_position} | "
+                  f"Pos Error: {pos_err_str} m | Orient Error: {orient_err_str} deg | Cmd: {effective_command} | L/R Spd: {left_motor_speed:.2f}/{right_motor_speed:.2f}")
             
     # Cleanup
     network_manager.close_connection()
