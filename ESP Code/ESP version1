@@ -11,8 +11,8 @@ from machine import Pin
 import math
 
 # Network Configuration
-WIFI_SSID = 'CJ'
-WIFI_PASSWORD = '4533simon'
+WIFI_SSID = ''
+WIFI_PASSWORD = ''
 SERVER_PORT = 8080
 
 # Hardware Configuration
