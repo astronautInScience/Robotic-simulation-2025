@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import json
 
 # Network Configuration
-ESP32_IP_ADDRESS = "10.149.34.66"
+ESP32_IP_ADDRESS = ""
 ESP32_PORT = 8080
 
 # Robot Physical Parameters
